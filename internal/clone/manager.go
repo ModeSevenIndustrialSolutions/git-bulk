@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/provider"
+	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
 	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/worker"
 )
 
@@ -36,6 +37,8 @@ type Config struct {
 	ValidateClone    bool // Validate that clone was successful
 	CleanupOnFailure bool // Remove failed clone directories
 	MaxConcurrentOps int  // Maximum concurrent clone operations per worker
+	// SSH configuration
+	SSHConfig *sshauth.SSHConfig
 }
 
 // DefaultConfig returns a sensible default configuration
@@ -54,6 +57,7 @@ func DefaultConfig() *Config {
 		ValidateClone:    true,
 		CleanupOnFailure: true,
 		MaxConcurrentOps: 2,
+		SSHConfig:        sshauth.DefaultConfig(),
 	}
 }
 
@@ -67,6 +71,7 @@ type Manager struct {
 	mu           sync.RWMutex
 	cloneResults map[string]*Result
 	stats        *OperationStats
+	sshWrapper   *sshauth.GitSSHWrapper
 }
 
 // OperationStats tracks clone operation statistics
@@ -111,7 +116,7 @@ func NewManager(config *Config, prov provider.Provider, sourceInfo *provider.Sou
 		config = DefaultConfig()
 	}
 
-	return &Manager{
+	manager := &Manager{
 		config:       config,
 		pool:         worker.NewPool(config.WorkerConfig),
 		provider:     prov,
@@ -122,6 +127,19 @@ func NewManager(config *Config, prov provider.Provider, sourceInfo *provider.Sou
 			StartTime: time.Now(),
 		},
 	}
+
+	// Initialize SSH wrapper if SSH is enabled
+	if config.UseSSH && config.SSHConfig != nil {
+		sshWrapper, err := sshauth.NewGitSSHWrapper(config.SSHConfig)
+		if err != nil {
+			// Log warning but continue without SSH
+			fmt.Printf("Warning: SSH wrapper initialization failed: %v\n", err)
+		} else {
+			manager.sshWrapper = sshWrapper
+		}
+	}
+
+	return manager
 }
 
 // CloneAll clones all repositories from the configured source
@@ -353,7 +371,9 @@ func (m *Manager) createCloneTask(repo *provider.Repository) func(ctx context.Co
 			// Perform cleanup if enabled
 			if m.config.CleanupOnFailure {
 				m.logf("Cleaning up partial clone at %s", localPath)
-				os.RemoveAll(localPath)
+				if err := os.RemoveAll(localPath); err != nil {
+					m.logf("Warning: failed to clean up %s: %v", localPath, err)
+				}
 			}
 			return result.Error
 		}
@@ -367,7 +387,9 @@ func (m *Manager) createCloneTask(repo *provider.Repository) func(ctx context.Co
 				// Perform cleanup if enabled
 				if m.config.CleanupOnFailure {
 					m.logf("Cleaning up invalid clone at %s", localPath)
-					os.RemoveAll(localPath)
+					if cleanupErr := os.RemoveAll(localPath); cleanupErr != nil {
+						m.logf("Warning: failed to clean up %s: %v", localPath, cleanupErr)
+					}
 				}
 				return result.Error
 			}
@@ -520,7 +542,9 @@ func (m *Manager) performClone(ctx context.Context, cloneURL, localPath string) 
 	if m.config.ValidateClone {
 		if err := m.validateClone(localPath); err != nil {
 			if m.config.CleanupOnFailure {
-				os.RemoveAll(localPath)
+				if cleanupErr := os.RemoveAll(localPath); cleanupErr != nil {
+					m.logf("Warning: failed to clean up %s: %v", localPath, cleanupErr)
+				}
 			}
 			return fmt.Errorf("clone validation failed: %w", err)
 		}

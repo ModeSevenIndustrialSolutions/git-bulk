@@ -321,9 +321,10 @@ func TestManagerCloneRepositoriesWithHierarchy(t *testing.T) {
 
 		// For hierarchical repositories, the path should include the full namespace
 		expectedParts := []string{tempDir}
-		if repos[i].FullName == "myorg/team1/repo1" {
+		switch repos[i].FullName {
+		case "myorg/team1/repo1":
 			expectedParts = append(expectedParts, "myorg", "team1", "repo1")
-		} else if repos[i].FullName == "myorg/team2/repo2" {
+		case "myorg/team2/repo2":
 			expectedParts = append(expectedParts, "myorg", "team2", "repo2")
 		}
 		expectedPath := filepath.Join(expectedParts...)

@@ -15,7 +15,11 @@ func TestCredentialsLoader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create test credentials file
 	credentialsPath := filepath.Join(tempDir, ".credentials")
@@ -64,7 +68,11 @@ func TestCredentialsLoaderEnvironmentPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create test credentials file
 	credentialsPath := filepath.Join(tempDir, ".credentials")
@@ -78,13 +86,19 @@ func TestCredentialsLoaderEnvironmentPriority(t *testing.T) {
 	oldEnv := os.Getenv("GITHUB_TOKEN")
 	defer func() {
 		if oldEnv == "" {
-			os.Unsetenv("GITHUB_TOKEN")
+			if err := os.Unsetenv("GITHUB_TOKEN"); err != nil {
+				t.Logf("Failed to unset GITHUB_TOKEN: %v", err)
+			}
 		} else {
-			os.Setenv("GITHUB_TOKEN", oldEnv)
+			if err := os.Setenv("GITHUB_TOKEN", oldEnv); err != nil {
+				t.Logf("Failed to restore GITHUB_TOKEN: %v", err)
+			}
 		}
 	}()
 
-	os.Setenv("GITHUB_TOKEN", "env_token")
+	if err := os.Setenv("GITHUB_TOKEN", "env_token"); err != nil {
+		t.Fatalf("Failed to set GITHUB_TOKEN: %v", err)
+	}
 
 	// Test that environment variable takes priority
 	loader := NewCredentialsLoader(credentialsPath)
@@ -119,7 +133,11 @@ func TestCredentialsLoaderInvalidFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create test credentials file with invalid format
 	credentialsPath := filepath.Join(tempDir, ".credentials")
@@ -146,7 +164,11 @@ func TestListCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	// Create test credentials file
 	credentialsPath := filepath.Join(tempDir, ".credentials")

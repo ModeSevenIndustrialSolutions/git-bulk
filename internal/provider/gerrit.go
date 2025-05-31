@@ -15,16 +15,20 @@ import (
 	"strings"
 	"time"
 
+	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/time/rate"
 )
 
 // GerritProvider implements the Provider interface for Gerrit
 type GerritProvider struct {
-	client   *http.Client
-	limiter  *rate.Limiter
-	baseURL  string
-	username string
-	password string
+	client    *http.Client
+	limiter   *rate.Limiter
+	baseURL   string
+	username  string
+	password  string
+	sshAuth   *sshauth.SSHAuthenticator
+	enableSSH bool
 }
 
 // GerritProject represents a Gerrit project
@@ -60,6 +64,11 @@ type GerritAccount struct {
 
 // NewGerritProvider creates a new Gerrit provider
 func NewGerritProvider(baseURL, username, password string) (*GerritProvider, error) {
+	return NewGerritProviderWithSSH(baseURL, username, password, true)
+}
+
+// NewGerritProviderWithSSH creates a new Gerrit provider with SSH configuration
+func NewGerritProviderWithSSH(baseURL, username, password string, enableSSH bool) (*GerritProvider, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("gerrit base URL is required")
 	}
@@ -77,13 +86,32 @@ func NewGerritProvider(baseURL, username, password string) (*GerritProvider, err
 	// Create rate limiter: Conservative rate limit for Gerrit
 	limiter := rate.NewLimiter(rate.Every(200*time.Millisecond), 5)
 
-	return &GerritProvider{
-		client:   client,
-		limiter:  limiter,
-		baseURL:  baseURL,
-		username: username,
-		password: password,
-	}, nil
+	provider := &GerritProvider{
+		client:    client,
+		limiter:   limiter,
+		baseURL:   baseURL,
+		username:  username,
+		password:  password,
+		enableSSH: enableSSH,
+	}
+
+	// Initialize SSH authentication if enabled
+	if enableSSH {
+		sshConfig := &sshauth.SSHConfig{
+			Timeout: time.Second * 30,
+			Verbose: false, // Can be made configurable
+		}
+
+		var err error
+		provider.sshAuth, err = sshauth.NewSSHAuthenticator(sshConfig)
+		if err != nil {
+			// SSH authentication initialization failed, but we can still fall back to HTTP
+			fmt.Printf("Warning: SSH authentication initialization failed: %v\n", err)
+			provider.enableSSH = false
+		}
+	}
+
+	return provider, nil
 }
 
 // Name returns the provider name
@@ -431,4 +459,81 @@ func (g *GerritProvider) parseResponse(resp *http.Response, target interface{}) 
 	bodyStr = bodyStr[5:]
 
 	return json.Unmarshal([]byte(bodyStr), target)
+}
+
+// AuthMethod returns the preferred authentication method for Gerrit (HTTP or SSH)
+func (g *GerritProvider) AuthMethod() string {
+	// Check if SSH is configured and usable
+	if g.username != "" && g.password == "" {
+		return "ssh"
+	}
+	return "http"
+}
+
+// SSHClientConfig returns SSH client configuration for Gerrit
+func (g *GerritProvider) SSHClientConfig() (*ssh.ClientConfig, error) {
+	if !g.enableSSH || g.sshAuth == nil {
+		return nil, fmt.Errorf("SSH authentication not enabled or available")
+	}
+
+	if g.username == "" {
+		return nil, fmt.Errorf("SSH username required for Gerrit")
+	}
+
+	authMethods := g.sshAuth.GetAuthMethods()
+	if len(authMethods) == 0 {
+		// Fallback to password authentication if available
+		if g.password != "" {
+			authMethods = append(authMethods, ssh.Password(g.password))
+		} else {
+			return nil, fmt.Errorf("no SSH authentication methods available")
+		}
+	}
+
+	return &ssh.ClientConfig{
+		User:            g.username,
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Handle host key verification properly
+		Timeout:         time.Second * 30,
+	}, nil
+}
+
+// TestSSHConnection tests SSH connectivity to Gerrit server
+func (g *GerritProvider) TestSSHConnection() error {
+	if !g.enableSSH {
+		return fmt.Errorf("SSH not enabled")
+	}
+
+	u, err := url.Parse(g.baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid base URL: %w", err)
+	}
+
+	host := u.Hostname()
+	port := 29418 // Default Gerrit SSH port
+	if u.Port() != "" {
+		if portNum, err := strconv.Atoi(u.Port()); err == nil {
+			port = portNum
+		}
+	}
+
+	config, err := g.SSHClientConfig()
+	if err != nil {
+		return err
+	}
+
+	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", host, port), config)
+	if err != nil {
+		return fmt.Errorf("SSH connection failed: %w", err)
+	}
+	defer func() {
+		_ = conn.Close() // Ignore close error for test connection
+	}()
+
+	return nil
+}
+
+// SupportsSSH returns whether SSH authentication is available
+func (g *GerritProvider) SupportsSSH() bool {
+	return g.enableSSH && g.sshAuth != nil
 }

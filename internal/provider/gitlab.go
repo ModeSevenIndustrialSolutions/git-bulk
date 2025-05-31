@@ -12,20 +12,29 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.com/gitlab-org/api/client-go"
+	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
+	gitlab "gitlab.com/gitlab-org/api/client-go"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/time/rate"
 )
 
 // GitLabProvider implements the Provider interface for GitLab
 type GitLabProvider struct {
-	client  *gitlab.Client
-	limiter *rate.Limiter
-	token   string
-	baseURL string
+	client    *gitlab.Client
+	limiter   *rate.Limiter
+	token     string
+	baseURL   string
+	sshAuth   *sshauth.SSHAuthenticator
+	enableSSH bool
 }
 
 // NewGitLabProvider creates a new GitLab provider
 func NewGitLabProvider(token, baseURL string) (*GitLabProvider, error) {
+	return NewGitLabProviderWithSSH(token, baseURL, true)
+}
+
+// NewGitLabProviderWithSSH creates a new GitLab provider with SSH configuration
+func NewGitLabProviderWithSSH(token, baseURL string, enableSSH bool) (*GitLabProvider, error) {
 	var client *gitlab.Client
 	var err error
 
@@ -43,12 +52,30 @@ func NewGitLabProvider(token, baseURL string) (*GitLabProvider, error) {
 	// This translates to about 33 requests per second, so we'll use 10 requests per second to be safe
 	limiter := rate.NewLimiter(rate.Every(100*time.Millisecond), 10)
 
-	return &GitLabProvider{
-		client:  client,
-		limiter: limiter,
-		token:   token,
-		baseURL: baseURL,
-	}, nil
+	provider := &GitLabProvider{
+		client:    client,
+		limiter:   limiter,
+		token:     token,
+		baseURL:   baseURL,
+		enableSSH: enableSSH,
+	}
+
+	// Initialize SSH authentication if enabled
+	if enableSSH {
+		sshConfig := &sshauth.SSHConfig{
+			Timeout: time.Second * 30,
+			Verbose: false,
+		}
+
+		provider.sshAuth, err = sshauth.NewSSHAuthenticator(sshConfig)
+		if err != nil {
+			// SSH authentication initialization failed, but we can still fall back to HTTP
+			fmt.Printf("Warning: SSH authentication initialization failed: %v\n", err)
+			provider.enableSSH = false
+		}
+	}
+
+	return provider, nil
 }
 
 // Name returns the provider name
@@ -200,7 +227,7 @@ func (g *GitLabProvider) GetOrganization(ctx context.Context, groupName string) 
 			"full_path":     group.FullPath,
 			"full_name":     group.FullName,
 			"created_at":    group.CreatedAt.Format(time.RFC3339),
-			"project_count": strconv.Itoa(len(group.Projects)),
+			"project_count": "0", // Use ListGroupProjects to get actual count if needed
 		},
 	}, nil
 }
@@ -356,9 +383,9 @@ func (g *GitLabProvider) convertProject(project *gitlab.Project) *Repository {
 			"visibility":       string(project.Visibility),
 			"default_branch":   project.DefaultBranch,
 			"archived":         strconv.FormatBool(project.Archived),
-			"issues_enabled":   strconv.FormatBool(project.IssuesEnabled),
-			"wiki_enabled":     strconv.FormatBool(project.WikiEnabled),
-			"snippets_enabled": strconv.FormatBool(project.SnippetsEnabled),
+			"issues_enabled":   strconv.FormatBool(project.IssuesAccessLevel != gitlab.DisabledAccessControl),
+			"wiki_enabled":     strconv.FormatBool(project.WikiAccessLevel != gitlab.DisabledAccessControl),
+			"snippets_enabled": strconv.FormatBool(project.SnippetsAccessLevel != gitlab.DisabledAccessControl),
 		},
 	}
 
@@ -515,4 +542,58 @@ func (g *GitLabProvider) handleRateLimit(err error, resp *gitlab.Response) error
 	}
 
 	return err
+}
+
+// SSHClientConfig returns SSH client configuration for GitLab
+func (g *GitLabProvider) SSHClientConfig() (*ssh.ClientConfig, error) {
+	if !g.enableSSH || g.sshAuth == nil {
+		return nil, fmt.Errorf("SSH authentication not enabled or available")
+	}
+
+	authMethods := g.sshAuth.GetAuthMethods()
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no SSH authentication methods available")
+	}
+
+	return &ssh.ClientConfig{
+		User:            "git", // GitLab uses 'git' as the SSH user
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Handle host key verification properly
+		Timeout:         time.Second * 30,
+	}, nil
+}
+
+// TestSSHConnection tests SSH connectivity to GitLab
+func (g *GitLabProvider) TestSSHConnection() error {
+	if !g.enableSSH {
+		return fmt.Errorf("SSH not enabled")
+	}
+
+	config, err := g.SSHClientConfig()
+	if err != nil {
+		return err
+	}
+
+	// Determine the host from baseURL or use default
+	host := "gitlab.com"
+	if g.baseURL != "" {
+		if u, err := url.Parse(g.baseURL); err == nil && u.Host != "" {
+			host = u.Host
+		}
+	}
+
+	conn, err := ssh.Dial("tcp", host+":22", config)
+	if err != nil {
+		return fmt.Errorf("SSH connection to GitLab failed: %w", err)
+	}
+	defer func() {
+		_ = conn.Close() // Ignore close error for test connection
+	}()
+
+	return nil
+}
+
+// SupportsSSH returns whether SSH authentication is available
+func (g *GitLabProvider) SupportsSSH() bool {
+	return g.enableSSH && g.sshAuth != nil
 }

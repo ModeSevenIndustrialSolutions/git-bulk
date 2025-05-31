@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/go-github/v53/github"
+	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
+	"golang.org/x/crypto/ssh"
 	"golang.org/x/time/rate"
 )
 
@@ -30,14 +32,21 @@ func (t *githubTokenTransport) RoundTrip(req *http.Request) (*http.Response, err
 
 // GitHubProvider implements the Provider interface for GitHub
 type GitHubProvider struct {
-	client  *github.Client
-	limiter *rate.Limiter
-	token   string
-	baseURL string
+	client    *github.Client
+	limiter   *rate.Limiter
+	token     string
+	baseURL   string
+	sshAuth   *sshauth.SSHAuthenticator
+	enableSSH bool
 }
 
 // NewGitHubProvider creates a new GitHub provider
 func NewGitHubProvider(token, baseURL string) (*GitHubProvider, error) {
+	return NewGitHubProviderWithSSH(token, baseURL, true)
+}
+
+// NewGitHubProviderWithSSH creates a new GitHub provider with SSH configuration
+func NewGitHubProviderWithSSH(token, baseURL string, enableSSH bool) (*GitHubProvider, error) {
 	var client *github.Client
 
 	if token != "" {
@@ -65,12 +74,31 @@ func NewGitHubProvider(token, baseURL string) (*GitHubProvider, error) {
 	// This translates to about 1.4 requests per second, so we'll use 1 request per second
 	limiter := rate.NewLimiter(rate.Every(time.Second), 5)
 
-	return &GitHubProvider{
-		client:  client,
-		limiter: limiter,
-		token:   token,
-		baseURL: baseURL,
-	}, nil
+	provider := &GitHubProvider{
+		client:    client,
+		limiter:   limiter,
+		token:     token,
+		baseURL:   baseURL,
+		enableSSH: enableSSH,
+	}
+
+	// Initialize SSH authentication if enabled
+	if enableSSH {
+		sshConfig := &sshauth.SSHConfig{
+			Timeout: time.Second * 30,
+			Verbose: false,
+		}
+
+		var err error
+		provider.sshAuth, err = sshauth.NewSSHAuthenticator(sshConfig)
+		if err != nil {
+			// SSH authentication initialization failed, but we can still fall back to HTTP
+			fmt.Printf("Warning: SSH authentication initialization failed: %v\n", err)
+			provider.enableSSH = false
+		}
+	}
+
+	return provider, nil
 }
 
 // Name returns the provider name
@@ -483,4 +511,50 @@ func (g *GitHubProvider) handleRateLimit(err error, resp *github.Response) error
 	}
 
 	return err
+}
+
+// SSHClientConfig returns SSH client configuration for GitHub
+func (g *GitHubProvider) SSHClientConfig() (*ssh.ClientConfig, error) {
+	if !g.enableSSH || g.sshAuth == nil {
+		return nil, fmt.Errorf("SSH authentication not enabled or available")
+	}
+
+	authMethods := g.sshAuth.GetAuthMethods()
+	if len(authMethods) == 0 {
+		return nil, fmt.Errorf("no SSH authentication methods available")
+	}
+
+	return &ssh.ClientConfig{
+		User:            "git", // GitHub uses 'git' as the SSH user
+		Auth:            authMethods,
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Handle host key verification properly
+		Timeout:         time.Second * 30,
+	}, nil
+}
+
+// TestSSHConnection tests SSH connectivity to GitHub
+func (g *GitHubProvider) TestSSHConnection() error {
+	if !g.enableSSH {
+		return fmt.Errorf("SSH not enabled")
+	}
+
+	config, err := g.SSHClientConfig()
+	if err != nil {
+		return err
+	}
+
+	conn, err := ssh.Dial("tcp", "github.com:22", config)
+	if err != nil {
+		return fmt.Errorf("SSH connection to GitHub failed: %w", err)
+	}
+	defer func() {
+		_ = conn.Close() // Ignore close error for test connection
+	}()
+
+	return nil
+}
+
+// SupportsSSH returns whether SSH authentication is available
+func (g *GitHubProvider) SupportsSSH() bool {
+	return g.enableSSH && g.sshAuth != nil
 }

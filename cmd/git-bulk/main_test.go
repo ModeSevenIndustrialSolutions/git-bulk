@@ -58,7 +58,11 @@ func TestRunClone(t *testing.T) {
 			if err != nil {
 				t.Fatalf(testTempErr, err)
 			}
-			defer os.RemoveAll(tmpDir)
+			defer func() {
+				if err := os.RemoveAll(tmpDir); err != nil {
+					t.Logf("Failed to remove temp dir: %v", err)
+				}
+			}()
 
 			tt.cfg.OutputDir = tmpDir
 
@@ -146,7 +150,11 @@ func TestConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf(testTempErr, err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	cfg.OutputDir = tmpDir
 	cfg.DryRun = true
@@ -165,7 +173,11 @@ func BenchmarkRunClone(b *testing.B) {
 	if err != nil {
 		b.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			b.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
 
 	cfg := Config{
 		OutputDir: tempDir,
@@ -176,7 +188,9 @@ func BenchmarkRunClone(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		subDir := filepath.Join(tempDir, "bench", string(rune('a'+i)))
-		os.MkdirAll(subDir, 0755)
+		if err := os.MkdirAll(subDir, 0755); err != nil {
+			b.Fatalf("Failed to create directory: %v", err)
+		}
 		cfg.OutputDir = subDir
 
 		err := runClone(cfg, "github.com/octocat")

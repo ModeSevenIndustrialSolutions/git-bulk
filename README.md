@@ -118,6 +118,73 @@ git-bulk clone github.com/myorg --dry-run --verbose
 # Shows which credentials are available with ✅/❌ indicators
 ```
 
+### SSH Authentication
+
+The tool provides transparent SSH authentication support that integrates with your existing SSH infrastructure including ssh-agent, GPG, and hardware security modules like Secretive (for Apple Silicon secure enclave).
+
+#### SSH Setup and Validation
+
+Validate your SSH authentication setup:
+
+```bash
+# Basic SSH setup validation
+git-bulk ssh-setup
+
+# Detailed SSH setup information
+git-bulk ssh-setup --verbose
+```
+
+#### Using SSH for Cloning
+
+```bash
+# Use SSH for all clone operations
+git-bulk clone github.com/myorg --ssh --output ./repos
+
+# SSH works with all supported providers
+git-bulk clone gitlab.com/mygroup --ssh --output ./repos
+git-bulk clone https://gerrit.example.com --ssh --output ./repos
+```
+
+#### SSH Configuration
+
+The tool automatically detects and uses:
+
+- **SSH Agent**: Automatically detects `SSH_AUTH_SOCK` environment variable
+- **SSH Keys**: Auto-discovers common SSH key files in `~/.ssh/` (id_rsa, id_ed25519, etc.)
+- **SSH Config**: Reads `~/.ssh/config` for host-specific settings
+- **Hardware Tokens**: Works with hardware security modules and secure enclaves
+
+**SSH Provider Support:**
+
+- **GitHub**: Uses standard SSH port 22 with `git@github.com`
+- **GitLab**: Uses standard SSH port 22 with `git@gitlab.com`
+- **Gerrit**: Uses SSH port 29418 with SSH URL format `ssh://host:29418/repo`
+
+**SSH Authentication Priority:**
+
+1. SSH Agent (if available and contains loaded keys)
+2. SSH key files (with automatic passphrase detection)
+3. Fallback to HTTPS authentication if SSH fails
+
+#### Advanced SSH Configuration
+
+For custom SSH configurations, the tool respects standard SSH config files:
+
+```bash
+# ~/.ssh/config example
+Host my-gerrit
+    HostName gerrit.company.com
+    Port 29418
+    User myusername
+    IdentityFile ~/.ssh/id_ed25519_work
+    ProxyCommand ssh gateway.company.com -W %h:%p
+
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519_personal
+```
+
 ## Architecture
 
 The tool is built around a modular thread pool architecture:

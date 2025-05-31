@@ -60,6 +60,15 @@ type Organization struct {
 	Metadata    map[string]string // Provider-specific metadata
 }
 
+// SSHProvider defines the interface for SSH-enabled providers
+type SSHProvider interface {
+	// SupportsSSH returns whether SSH authentication is available
+	SupportsSSH() bool
+
+	// TestSSHConnection tests SSH connectivity
+	TestSSHConnection() error
+}
+
 // Provider defines the interface for Git hosting providers
 type Provider interface {
 	// Name returns the provider name (e.g., "github", "gitlab", "gerrit")

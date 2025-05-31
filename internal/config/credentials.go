@@ -42,7 +42,12 @@ func (c *CredentialsLoader) LoadCredentials() error {
 	if err != nil {
 		return fmt.Errorf("failed to open credentials file %s: %w", c.credentialsPath, err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			// Log the error but don't override the main function's return error
+			fmt.Printf("Warning: failed to close credentials file: %v\n", err)
+		}
+	}()
 
 	scanner := bufio.NewScanner(file)
 	lineNumber := 0

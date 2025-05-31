@@ -15,6 +15,7 @@ import (
 	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/clone"
 	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/config"
 	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/provider"
+	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
 	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/worker"
 	"github.com/spf13/cobra"
 )
@@ -74,6 +75,25 @@ Examples:
 		},
 	}
 
+	sshCmd := &cobra.Command{
+		Use:   "ssh-setup",
+		Short: "Validate SSH authentication setup",
+		Long: `Validate that SSH authentication is properly configured for Git operations.
+
+This command checks:
+- SSH agent availability and connection
+- SSH key files in ~/.ssh/
+- Connectivity to common Git hosting providers
+- Proper SSH configuration
+
+Examples:
+  git-bulk ssh-setup                 # Basic SSH setup validation
+  git-bulk ssh-setup --verbose       # Detailed SSH setup information`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSSHSetup(cfg)
+		},
+	}
+
 	// Global flags
 	rootCmd.PersistentFlags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable verbose output")
 	rootCmd.PersistentFlags().DurationVar(&cfg.Timeout, "timeout", 30*time.Minute, "Overall operation timeout")
@@ -96,7 +116,7 @@ Examples:
 	cloneCmd.Flags().StringVar(&cfg.GerritToken, "gerrit-token", "", "Gerrit token (or set GERRIT_TOKEN)")
 	cloneCmd.Flags().StringVar(&cfg.CredentialsFile, "credentials-file", "", "Path to credentials file (default: auto-detect)")
 
-	rootCmd.AddCommand(cloneCmd)
+	rootCmd.AddCommand(cloneCmd, sshCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal(err)
@@ -170,18 +190,36 @@ func runClone(cfg Config, source string) error {
 	manager := provider.NewProviderManager(providerConfig)
 
 	// Register providers - always register GitHub and GitLab for maximum compatibility
-	if githubProvider, err := provider.NewGitHubProvider(cfg.GitHubToken, ""); err == nil {
-		manager.RegisterProvider("github", githubProvider)
-	}
+	if cfg.UseSSH {
+		// Use SSH-enabled providers
+		if githubProvider, err := provider.NewGitHubProviderWithSSH(cfg.GitHubToken, "", true); err == nil {
+			manager.RegisterProvider("github", githubProvider)
+		}
 
-	if gitlabProvider, err := provider.NewGitLabProvider(cfg.GitLabToken, ""); err == nil {
-		manager.RegisterProvider("gitlab", gitlabProvider)
+		if gitlabProvider, err := provider.NewGitLabProviderWithSSH(cfg.GitLabToken, "", true); err == nil {
+			manager.RegisterProvider("gitlab", gitlabProvider)
+		}
+	} else {
+		// Use standard HTTP providers
+		if githubProvider, err := provider.NewGitHubProvider(cfg.GitHubToken, ""); err == nil {
+			manager.RegisterProvider("github", githubProvider)
+		}
+
+		if gitlabProvider, err := provider.NewGitLabProvider(cfg.GitLabToken, ""); err == nil {
+			manager.RegisterProvider("gitlab", gitlabProvider)
+		}
 	}
 
 	// Only register Gerrit if credentials are provided or source suggests Gerrit
 	if cfg.GerritUser != "" || strings.Contains(source, "gerrit") {
-		if gerritProvider, err := provider.NewGerritProvider("", cfg.GerritUser, cfg.GerritPass); err == nil {
-			manager.RegisterProvider("gerrit", gerritProvider)
+		if cfg.UseSSH {
+			if gerritProvider, err := provider.NewGerritProviderWithSSH("", cfg.GerritUser, cfg.GerritPass, true); err == nil {
+				manager.RegisterProvider("gerrit", gerritProvider)
+			}
+		} else {
+			if gerritProvider, err := provider.NewGerritProvider("", cfg.GerritUser, cfg.GerritPass); err == nil {
+				manager.RegisterProvider("gerrit", gerritProvider)
+			}
 		}
 	}
 
@@ -244,6 +282,10 @@ func runClone(cfg Config, source string) error {
 
 	cloneConfig := &clone.Config{
 		WorkerConfig:   workerConfig,
+		OutputDir:      cfg.OutputDir,
+		UseSSH:         cfg.UseSSH,
+		Verbose:        cfg.Verbose,
+		DryRun:         cfg.DryRun,
 		ContinueOnFail: true,
 	}
 
@@ -258,32 +300,64 @@ func runClone(cfg Config, source string) error {
 	fmt.Printf("Cloning repositories to %s...\n", cfg.OutputDir)
 	results, err := cloneManager.CloneRepositories(ctx, repos, cfg.OutputDir, false, cfg.UseSSH)
 	if err != nil {
-		return fmt.Errorf("clone operation failed: %w", err)
+		return fmt.Errorf("failed to clone repositories: %w", err)
 	}
 
 	// Print results
-	successful := 0
-	failed := 0
-
+	fmt.Println("\nClone results:")
 	for _, result := range results {
+		status := "✅"
 		if result.Error != nil {
-			failed++
-			if cfg.Verbose {
-				fmt.Printf("✗ %s: %v\n", result.Repository.FullName, result.Error)
-			}
-		} else {
-			successful++
-			if cfg.Verbose {
-				fmt.Printf("✓ %s -> %s\n", result.Repository.FullName,
-					filepath.Join(cfg.OutputDir, result.Repository.Name))
-			}
+			status = "❌"
+		}
+		fmt.Printf("  %s: %s\n", status, result.Repository.FullName)
+		if result.Error != nil {
+			fmt.Printf("    Error: %v\n", result.Error)
 		}
 	}
 
-	fmt.Printf("\nClone complete: %d successful, %d failed\n", successful, failed)
+	return nil
+}
 
-	if failed > 0 {
-		return fmt.Errorf("%d repositories failed to clone", failed)
+func runSSHSetup(cfg Config) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancel()
+
+	fmt.Println("SSH Authentication Setup Validation")
+	fmt.Println("====================================")
+
+	// Validate SSH setup
+	if err := sshauth.ValidateSSHSetup(ctx, cfg.Verbose); err != nil {
+		fmt.Printf("❌ SSH setup validation failed: %v\n", err)
+		return err
+	}
+
+	fmt.Println("✅ SSH authentication setup is working correctly!")
+
+	if cfg.Verbose {
+		fmt.Println("\nSSH Configuration Details:")
+
+		// Show SSH agent status
+		agentSocket := os.Getenv("SSH_AUTH_SOCK")
+		if agentSocket != "" {
+			fmt.Printf("  SSH Agent: %s\n", agentSocket)
+		} else {
+			fmt.Println("  SSH Agent: Not available")
+		}
+
+		// Show SSH key files
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			sshDir := filepath.Join(homeDir, ".ssh")
+			if entries, err := os.ReadDir(sshDir); err == nil {
+				fmt.Println("  SSH Keys:")
+				for _, entry := range entries {
+					if strings.HasPrefix(entry.Name(), "id_") && !strings.HasSuffix(entry.Name(), ".pub") {
+						fmt.Printf("    - %s\n", entry.Name())
+					}
+				}
+			}
+		}
 	}
 
 	return nil

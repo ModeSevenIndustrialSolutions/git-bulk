@@ -17,15 +17,21 @@ A comprehensive suite of Go command-line tools for bulk Git repository operation
 ## Installation
 
 ```bash
-go install github.com/modesevenindustrialsolutions/go-bulk-git/cmd/git-bulk@latest
+go install github.com/ModeSevenIndustrialSolutions/git-bulk/cmd/git-bulk@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/modesevenindustrialsolutions/go-bulk-git
-cd go-bulk-git
-go build -o git-bulk ./cmd/git-bulk
+git clone https://github.com/ModeSevenIndustrialSolutions/git-bulk
+cd git-bulk
+make build
+
+# Install to your Go bin path
+make install
+
+# Or install system-wide (requires sudo)
+make install-system
 ```
 
 ## Usage
@@ -211,13 +217,43 @@ The project uses the following major dependencies:
 ### Running tests
 
 ```bash
-go test ./...
+make test
+
+# Run tests with coverage
+make test-coverage
+
+# Run integration tests
+make test-integration
+
+# Run CLI tests
+make cli-test
 ```
 
 ### Building
 
 ```bash
-go build -o git-bulk ./cmd/git-bulk
+# Build for current platform
+make build
+
+# Build for multiple platforms
+make build-all
+
+# Clean build artifacts
+make clean
+```
+
+### Development workflow
+
+```bash
+# Set up development environment
+make dev-setup
+
+# Full development cycle
+make all
+
+# Run linting and security checks
+make lint
+make security
 ```
 
 ### Contributing

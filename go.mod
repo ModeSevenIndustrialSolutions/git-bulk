@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-module github.com/modesevenindustrialsolutions/go-bulk-git
+module github.com/ModeSevenIndustrialSolutions/git-bulk
 
 go 1.23.0
 
@@ -11,6 +11,7 @@ require (
 	github.com/google/go-github/v53 v53.2.0
 	github.com/spf13/cobra v1.9.1
 	gitlab.com/gitlab-org/api/client-go v0.129.0
+	golang.org/x/crypto v0.33.0
 	golang.org/x/time v0.11.0
 )
 
@@ -23,7 +24,6 @@ require (
 	github.com/hashicorp/go-retryablehttp v0.7.7 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
-	golang.org/x/crypto v0.33.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 )

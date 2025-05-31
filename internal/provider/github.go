@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
+	sshauth "github.com/ModeSevenIndustrialSolutions/git-bulk/internal/ssh"
 	"github.com/google/go-github/v53/github"
-	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/time/rate"
 )

@@ -6,7 +6,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/provider"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/provider"
 )
 
 func main() {

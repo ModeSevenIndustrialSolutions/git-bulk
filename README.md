@@ -78,7 +78,8 @@ export GERRIT_PASSWORD="your_gerrit_password"
 
 #### Credentials File Support
 
-You can also store credentials in a file instead of environment variables. The tool will automatically look for credential files in the following locations:
+You can also store credentials in a file instead of environment variables. The tool will automatically look for credential
+files in the following locations:
 
 1. `.credentials` (current directory)
 2. `.env` (current directory)
@@ -120,7 +121,8 @@ git-bulk clone github.com/myorg --dry-run --verbose
 
 ### SSH Authentication
 
-The tool provides transparent SSH authentication support that integrates with your existing SSH infrastructure including ssh-agent, GPG, and hardware security modules like Secretive (for Apple Silicon secure enclave).
+The tool provides transparent SSH authentication support that integrates with your existing SSH infrastructure including ssh-agent,
+GPG, and hardware security modules like Secretive (for Apple Silicon secure enclave).
 
 #### SSH Setup and Validation
 

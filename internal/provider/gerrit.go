@@ -27,7 +27,7 @@ type GerritProvider struct {
 	baseURL   string
 	username  string
 	password  string
-	sshAuth   *sshauth.SSHAuthenticator
+	sshAuth   *sshauth.Authenticator
 	enableSSH bool
 }
 
@@ -97,13 +97,13 @@ func NewGerritProviderWithSSH(baseURL, username, password string, enableSSH bool
 
 	// Initialize SSH authentication if enabled
 	if enableSSH {
-		sshConfig := &sshauth.SSHConfig{
+		sshConfig := &sshauth.Config{
 			Timeout: time.Second * 30,
 			Verbose: false, // Can be made configurable
 		}
 
 		var err error
-		provider.sshAuth, err = sshauth.NewSSHAuthenticator(sshConfig)
+		provider.sshAuth, err = sshauth.NewAuthenticator(sshConfig)
 		if err != nil {
 			// SSH authentication initialization failed, but we can still fall back to HTTP
 			fmt.Printf("Warning: SSH authentication initialization failed: %v\n", err)

@@ -189,4 +189,5 @@ git-bulk clone github.com/org --dry-run --verbose
 ---
 
 **Status: ✅ COMPLETE**
-All requested dependency migrations, updates, and cleanup have been successfully implemented and tested. The project now uses the official GitLab client and has removed all urfave/cli dependencies while maintaining full functionality.
+All requested dependency migrations, updates, and cleanup have been successfully implemented and tested. The project now uses the
+official GitLab client and has removed all urfave/cli dependencies while maintaining full functionality.

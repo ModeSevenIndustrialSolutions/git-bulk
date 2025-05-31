@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2025 The Linux Foundation
 
+// Package config provides credential management functionality for git-bulk operations.
+// It handles loading and parsing credentials from various sources including environment
+// variables and configuration files.
 package config
 
 import (

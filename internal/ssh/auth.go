@@ -17,8 +17,8 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 )
 
-// SSHConfig holds SSH configuration and authentication methods
-type SSHConfig struct {
+// Config holds SSH configuration and authentication methods
+type Config struct {
 	// SSH agent socket path (auto-detected if not provided)
 	AgentSocket string
 
@@ -57,29 +57,29 @@ type AuthMethod interface {
 	Available() bool
 }
 
-// SSHAuthenticator manages SSH authentication methods
-type SSHAuthenticator struct {
-	config      *SSHConfig
+// Authenticator manages SSH authentication methods
+type Authenticator struct {
+	config      *Config
 	authMethods []AuthMethod
 }
 
 // DefaultConfig returns a default SSH configuration
-func DefaultConfig() *SSHConfig {
-	return &SSHConfig{
+func DefaultConfig() *Config {
+	return &Config{
 		Timeout: 30 * time.Second,
 		Verbose: false,
 	}
 }
 
-// NewSSHAuthenticator creates a new SSH authenticator with auto-detection
-func NewSSHAuthenticator(config *SSHConfig) (*SSHAuthenticator, error) {
+// NewAuthenticator creates a new SSH authenticator with auto-detection
+func NewAuthenticator(config *Config) (*Authenticator, error) {
 	if config == nil {
-		config = &SSHConfig{
+		config = &Config{
 			Timeout: 30 * time.Second,
 		}
 	}
 
-	auth := &SSHAuthenticator{
+	auth := &Authenticator{
 		config:      config,
 		authMethods: make([]AuthMethod, 0),
 	}
@@ -98,7 +98,7 @@ func NewSSHAuthenticator(config *SSHConfig) (*SSHAuthenticator, error) {
 }
 
 // autoDetectConfig automatically detects SSH configuration
-func (a *SSHAuthenticator) autoDetectConfig() error {
+func (a *Authenticator) autoDetectConfig() error {
 	// Detect SSH agent socket
 	if a.config.AgentSocket == "" {
 		a.config.AgentSocket = os.Getenv("SSH_AUTH_SOCK")
@@ -127,7 +127,7 @@ func (a *SSHAuthenticator) autoDetectConfig() error {
 }
 
 // findSSHKeys finds common SSH key files
-func (a *SSHAuthenticator) findSSHKeys() []string {
+func (a *Authenticator) findSSHKeys() []string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil
@@ -150,10 +150,10 @@ func (a *SSHAuthenticator) findSSHKeys() []string {
 }
 
 // initAuthMethods initializes available authentication methods in priority order
-func (a *SSHAuthenticator) initAuthMethods() error {
+func (a *Authenticator) initAuthMethods() error {
 	// 1. SSH Agent (highest priority - includes hardware tokens like Secretive)
 	if a.config.AgentSocket != "" {
-		agentAuth := &SSHAgentAuth{
+		agentAuth := &AgentAuth{
 			socketPath: a.config.AgentSocket,
 			timeout:    a.config.Timeout,
 			verbose:    a.config.Verbose,
@@ -163,7 +163,7 @@ func (a *SSHAuthenticator) initAuthMethods() error {
 
 	// 2. SSH Key files
 	for _, keyFile := range a.config.KeyFiles {
-		keyAuth := &SSHKeyAuth{
+		keyAuth := &KeyAuth{
 			keyFile: keyFile,
 			timeout: a.config.Timeout,
 			verbose: a.config.Verbose,
@@ -175,7 +175,8 @@ func (a *SSHAuthenticator) initAuthMethods() error {
 }
 
 // GetAuthMethods returns all available SSH authentication methods
-func (a *SSHAuthenticator) GetAuthMethods() []ssh.AuthMethod {
+// GetAuthMethods returns the available SSH authentication methods
+func (a *Authenticator) GetAuthMethods() []ssh.AuthMethod {
 	var methods []ssh.AuthMethod
 
 	for _, authMethod := range a.authMethods {
@@ -194,8 +195,8 @@ func (a *SSHAuthenticator) GetAuthMethods() []ssh.AuthMethod {
 	return methods
 }
 
-// TestConnection tests SSH connection to a host
-func (a *SSHAuthenticator) TestConnection(ctx context.Context, host string, port int) error {
+// TestConnection tests SSH connectivity to a host
+func (a *Authenticator) TestConnection(_ context.Context, host string, port int) error {
 	if port == 0 {
 		port = 22
 	}
@@ -224,18 +225,20 @@ func (a *SSHAuthenticator) TestConnection(ctx context.Context, host string, port
 	return nil
 }
 
-// SSHAgentAuth implements SSH agent authentication
-type SSHAgentAuth struct {
+// AgentAuth implements SSH agent authentication
+type AgentAuth struct {
 	socketPath string
 	timeout    time.Duration
 	verbose    bool
 }
 
-func (a *SSHAgentAuth) Name() string {
+// Name returns the authentication method name
+func (a *AgentAuth) Name() string {
 	return "SSH Agent"
 }
 
-func (a *SSHAgentAuth) Available() bool {
+// Available checks if SSH agent authentication is available
+func (a *AgentAuth) Available() bool {
 	if a.socketPath == "" {
 		return false
 	}
@@ -249,7 +252,8 @@ func (a *SSHAgentAuth) Available() bool {
 	return true
 }
 
-func (a *SSHAgentAuth) Auth() (ssh.AuthMethod, error) {
+// Auth returns the SSH authentication method for agent auth
+func (a *AgentAuth) Auth() (ssh.AuthMethod, error) {
 	conn, err := net.Dial("unix", a.socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to SSH agent: %w", err)
@@ -259,23 +263,26 @@ func (a *SSHAgentAuth) Auth() (ssh.AuthMethod, error) {
 	return ssh.PublicKeysCallback(agentClient.Signers), nil
 }
 
-// SSHKeyAuth implements SSH key file authentication
-type SSHKeyAuth struct {
+// KeyAuth implements SSH key file authentication
+type KeyAuth struct {
 	keyFile string
 	timeout time.Duration
 	verbose bool
 }
 
-func (a *SSHKeyAuth) Name() string {
+// Name returns the authentication method name
+func (a *KeyAuth) Name() string {
 	return fmt.Sprintf("SSH Key: %s", filepath.Base(a.keyFile))
 }
 
-func (a *SSHKeyAuth) Available() bool {
+// Available checks if the SSH key file is available
+func (a *KeyAuth) Available() bool {
 	_, err := os.Stat(a.keyFile)
 	return err == nil
 }
 
-func (a *SSHKeyAuth) Auth() (ssh.AuthMethod, error) {
+// Auth returns the SSH authentication method for key auth
+func (a *KeyAuth) Auth() (ssh.AuthMethod, error) {
 	key, err := os.ReadFile(a.keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %s: %w", a.keyFile, err)
@@ -300,13 +307,13 @@ func (a *SSHKeyAuth) Auth() (ssh.AuthMethod, error) {
 
 // GitSSHWrapper provides Git-specific SSH configuration
 type GitSSHWrapper struct {
-	authenticator *SSHAuthenticator
+	authenticator *Authenticator
 	tempDir       string
 }
 
 // NewGitSSHWrapper creates a new Git SSH wrapper
-func NewGitSSHWrapper(config *SSHConfig) (*GitSSHWrapper, error) {
-	auth, err := NewSSHAuthenticator(config)
+func NewGitSSHWrapper(config *Config) (*GitSSHWrapper, error) {
+	auth, err := NewAuthenticator(config)
 	if err != nil {
 		return nil, err
 	}
@@ -389,12 +396,12 @@ func (w *GitSSHWrapper) Cleanup() error {
 
 // ValidateSSHSetup validates that SSH authentication is working
 func ValidateSSHSetup(ctx context.Context, verbose bool) error {
-	config := &SSHConfig{
+	config := &Config{
 		Verbose: verbose,
 		Timeout: 10 * time.Second,
 	}
 
-	auth, err := NewSSHAuthenticator(config)
+	auth, err := NewAuthenticator(config)
 	if err != nil {
 		return fmt.Errorf("failed to create SSH authenticator: %w", err)
 	}

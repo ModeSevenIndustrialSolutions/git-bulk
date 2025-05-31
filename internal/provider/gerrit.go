@@ -370,7 +370,7 @@ func (g *GerritProvider) Close() error {
 
 // makeRequest makes an HTTP request to the Gerrit API
 func (g *GerritProvider) makeRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Response, error) {
-	url := g.baseURL + "r/" + endpoint
+	url := g.baseURL + "a/" + endpoint
 
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {

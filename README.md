@@ -10,7 +10,7 @@ A comprehensive suite of Go command-line tools for bulk Git repository operation
 - **Multi-platform Git hosting support**: GitHub, GitLab, and Gerrit
 - **Intelligent thread pooling**: Configurable worker threads with automatic rate limiting detection
 - **Exponential backoff**: Automatic retry with exponential backoff for failed operations
-- **Rich CLI interface**: Built with urfave/cli for comprehensive help and shell completion
+- **Rich CLI interface**: Built with Cobra for comprehensive help and shell completion
 - **Comprehensive testing**: Full test suite with coverage reporting
 - **Modular design**: Reusable components for building additional tools
 
@@ -86,6 +86,7 @@ You can also store credentials in a file instead of environment variables. The t
 4. `~/.git-bulk-credentials`
 
 **Credentials file format:**
+
 ```bash
 # Git hosting provider tokens
 GITHUB_TOKEN="ghp_your_github_token_here"
@@ -99,16 +100,19 @@ GERRIT_PASSWORD="your_password"
 ```
 
 **Priority order for credentials:**
+
 1. Command-line flags (`--github-token`, `--gitlab-token`, etc.)
 2. Environment variables (`GITHUB_TOKEN`, `GITLAB_TOKEN`, etc.)
 3. Credentials file values
 
 **Using a custom credentials file:**
+
 ```bash
 git-bulk clone github.com/myorg --credentials-file /path/to/my/credentials
 ```
 
 **View credential status:**
+
 ```bash
 git-bulk clone github.com/myorg --dry-run --verbose
 # Shows which credentials are available with ✅/❌ indicators
@@ -131,10 +135,9 @@ The tool is built around a modular thread pool architecture:
 The project uses the following major dependencies:
 
 - **CLI Framework**: `github.com/spf13/cobra` for command-line interface
-- **GitLab API**: `github.com/xanzy/go-gitlab@v0.115.0` for GitLab integration  
+- **GitLab API**: `gitlab.com/gitlab-org/api/client-go@v0.129.0` for GitLab integration
 - **GitHub API**: `github.com/google/go-github/v53` for GitHub integration
 - **Rate Limiting**: `golang.org/x/time@v0.11.0` for API rate limiting
-- **Testing**: `github.com/urfave/cli/v2@v2.27.6` for legacy test compatibility
 
 ### Running tests
 

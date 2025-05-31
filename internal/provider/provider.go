@@ -184,6 +184,11 @@ func ParseGenericSource(source string) (*SourceInfo, error) {
 	// Try to parse as hostname/org format
 	parts := strings.Split(source, "/")
 	if len(parts) >= 2 {
+		hostname := strings.ToLower(parts[0])
+		// If the hostname looks like a domain (contains dots) but isn't a known Git hosting service, reject it
+		if strings.Contains(parts[0], ".") && !strings.Contains(hostname, "github") && !strings.Contains(hostname, "gitlab") && !strings.Contains(hostname, "gerrit") {
+			return nil, fmt.Errorf("unknown Git hosting service: %s", parts[0])
+		}
 		return &SourceInfo{
 			Host:         parts[0],
 			Organization: parts[1],
@@ -235,8 +240,14 @@ func parseURL(source string) (*SourceInfo, error) {
 		providerName = "github"
 	case strings.Contains(hostname, "gitlab"):
 		providerName = "gitlab"
+	case strings.Contains(hostname, "gerrit"):
+		providerName = "gerrit"
 	default:
-		providerName = "gerrit" // Default to Gerrit for unknown hosts
+		// For unknown hosts, we can't determine the provider and require at least one path component
+		if len(nonEmptyParts) < 1 {
+			return nil, fmt.Errorf("invalid URL path: %s", u.Path)
+		}
+		providerName = "gerrit" // Default to Gerrit for unknown hosts with paths
 	}
 
 	// For GitHub and GitLab, we require at least one path component (org/user)

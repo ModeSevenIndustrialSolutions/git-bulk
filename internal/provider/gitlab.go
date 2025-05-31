@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xanzy/go-gitlab"
+	"gitlab.com/gitlab-org/api/client-go"
 	"golang.org/x/time/rate"
 )
 
@@ -208,7 +208,7 @@ func (g *GitLabProvider) GetOrganization(ctx context.Context, groupName string) 
 func (g *GitLabProvider) getUserAsOrganization(_ context.Context, username string) (*Organization, error) {
 	// Use ListUsers to find user by username
 	users, resp, err := g.client.Users.ListUsers(&gitlab.ListUsersOptions{
-		Username: &username,
+		Username: gitlab.Ptr(username),
 	})
 	if err != nil {
 		return nil, g.handleRateLimit(err, resp)
@@ -255,7 +255,7 @@ func (g *GitLabProvider) listGroupProjects(ctx context.Context, groupName string
 		ListOptions: gitlab.ListOptions{
 			PerPage: 100,
 		},
-		IncludeSubGroups: gitlab.Bool(true),
+		IncludeSubGroups: gitlab.Ptr(true),
 	}
 
 	for {
@@ -286,7 +286,7 @@ func (g *GitLabProvider) listUserProjects(ctx context.Context, username string) 
 
 	// Use ListUsers to find user by username first
 	users, resp, err := g.client.Users.ListUsers(&gitlab.ListUsersOptions{
-		Username: &username,
+		Username: gitlab.Ptr(username),
 	})
 	if err != nil {
 		return nil, g.handleRateLimit(err, resp)
@@ -302,7 +302,7 @@ func (g *GitLabProvider) listUserProjects(ctx context.Context, username string) 
 		ListOptions: gitlab.ListOptions{
 			PerPage: 100,
 		},
-		Owned: gitlab.Bool(true),
+		Owned: gitlab.Ptr(true),
 	}
 
 	for {
@@ -402,7 +402,7 @@ func (g *GitLabProvider) CreateOrganization(ctx context.Context, groupName, disp
 		Name:        &displayName,
 		Path:        &groupName,
 		Description: &description,
-		Visibility:  gitlab.Visibility(gitlab.PrivateVisibility), // Default to private
+		Visibility:  gitlab.Ptr(gitlab.PrivateVisibility), // Default to private
 	}
 
 	group, resp, err := g.client.Groups.CreateGroup(groupOpts)
@@ -452,10 +452,10 @@ func (g *GitLabProvider) SyncRepository(ctx context.Context, repo *Repository) e
 	// handle branch synchronization more carefully
 
 	mergeRequestOpts := &gitlab.CreateMergeRequestOptions{
-		Title:        gitlab.String("Sync with upstream"),
-		Description:  gitlab.String("Automated sync with upstream repository"),
-		SourceBranch: gitlab.String("main"), // Use default branch name
-		TargetBranch: gitlab.String(project.DefaultBranch),
+		Title:        gitlab.Ptr("Sync with upstream"),
+		Description:  gitlab.Ptr("Automated sync with upstream repository"),
+		SourceBranch: gitlab.Ptr("main"), // Use default branch name
+		TargetBranch: gitlab.Ptr(project.DefaultBranch),
 	}
 
 	_, resp, err = g.client.MergeRequests.CreateMergeRequest(projectID, mergeRequestOpts)

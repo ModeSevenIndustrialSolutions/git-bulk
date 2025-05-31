@@ -38,7 +38,7 @@ type Config struct {
 	CleanupOnFailure bool // Remove failed clone directories
 	MaxConcurrentOps int  // Maximum concurrent clone operations per worker
 	// SSH configuration
-	SSHConfig *sshauth.SSHConfig
+	SSHConfig *sshauth.Config
 }
 
 // DefaultConfig returns a sensible default configuration
@@ -93,21 +93,28 @@ type Result struct {
 	Error      error
 	Duration   time.Duration
 	JobID      string
-	Status     CloneStatus
+	Status     Status
 	RetryCount int
 }
 
-// CloneStatus represents the status of a clone operation
-type CloneStatus string
+// Status represents the status of a clone operation
+type Status string
 
 const (
-	StatusPending   CloneStatus = "pending"
-	StatusRunning   CloneStatus = "running"
-	StatusSuccess   CloneStatus = "success"
-	StatusFailed    CloneStatus = "failed"
-	StatusSkipped   CloneStatus = "skipped"
-	StatusExists    CloneStatus = "exists"
-	StatusValidated CloneStatus = "validated"
+	// StatusPending indicates the operation is waiting to start
+	StatusPending Status = "pending"
+	// StatusRunning indicates the operation is currently running
+	StatusRunning Status = "running"
+	// StatusSuccess indicates the operation completed successfully
+	StatusSuccess Status = "success"
+	// StatusFailed indicates the operation failed
+	StatusFailed Status = "failed"
+	// StatusSkipped indicates the operation was skipped
+	StatusSkipped Status = "skipped"
+	// StatusExists indicates the target already exists
+	StatusExists Status = "exists"
+	// StatusValidated indicates the operation was validated
+	StatusValidated Status = "validated"
 )
 
 // NewManager creates a new clone manager
@@ -682,12 +689,14 @@ func (m *Manager) logf(format string, args ...interface{}) {
 	}
 }
 
+// IncSuccessful increments the successful operation counter
 func (s *OperationStats) IncSuccessful() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Successful++
 }
 
+// IncFailed increments the failed operation counter and adds the error
 func (s *OperationStats) IncFailed(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -695,24 +704,28 @@ func (s *OperationStats) IncFailed(err error) {
 	s.Errors = append(s.Errors, err)
 }
 
+// IncSkipped increments the skipped operation counter
 func (s *OperationStats) IncSkipped() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Skipped++
 }
 
+// SetEndTime sets the end time for the operations
 func (s *OperationStats) SetEndTime(t time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.EndTime = t
 }
 
+// Duration returns the total duration of the operations
 func (s *OperationStats) Duration() time.Duration {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.EndTime.Sub(s.StartTime)
 }
 
+// LogSummary logs a summary of the operation statistics
 func (s *OperationStats) LogSummary() {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

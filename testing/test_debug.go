@@ -1,7 +1,11 @@
+// SPDX-FileCopyrightText: 2024 Matt Mode Seven Industrial Solutions
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
 	"fmt"
+
 	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/provider"
 )
 

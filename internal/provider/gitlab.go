@@ -24,7 +24,7 @@ type GitLabProvider struct {
 	limiter   *rate.Limiter
 	token     string
 	baseURL   string
-	sshAuth   *sshauth.SSHAuthenticator
+	sshAuth   *sshauth.Authenticator
 	enableSSH bool
 }
 
@@ -62,12 +62,12 @@ func NewGitLabProviderWithSSH(token, baseURL string, enableSSH bool) (*GitLabPro
 
 	// Initialize SSH authentication if enabled
 	if enableSSH {
-		sshConfig := &sshauth.SSHConfig{
+		sshConfig := &sshauth.Config{
 			Timeout: time.Second * 30,
 			Verbose: false,
 		}
 
-		provider.sshAuth, err = sshauth.NewSSHAuthenticator(sshConfig)
+		provider.sshAuth, err = sshauth.NewAuthenticator(sshConfig)
 		if err != nil {
 			// SSH authentication initialization failed, but we can still fall back to HTTP
 			fmt.Printf("Warning: SSH authentication initialization failed: %v\n", err)

@@ -23,12 +23,12 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestNewSSHAuthenticator(t *testing.T) {
-	config := &SSHConfig{
+	config := &Config{
 		Timeout: 10 * time.Second,
 		Verbose: false,
 	}
 
-	auth, err := NewSSHAuthenticator(config)
+	auth, err := NewAuthenticator(config)
 	if err != nil {
 		t.Fatalf("Failed to create SSH authenticator: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestNewSSHAuthenticator(t *testing.T) {
 }
 
 func TestNewSSHAuthenticatorWithNilConfig(t *testing.T) {
-	auth, err := NewSSHAuthenticator(nil)
+	auth, err := NewAuthenticator(nil)
 	if err != nil {
 		t.Fatalf("Failed to create SSH authenticator with nil config: %v", err)
 	}

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2024 Matt Mode Seven Industrial Solutions
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # SSH Authentication Implementation Summary
 
 ## ✅ COMPLETED FEATURES
@@ -176,4 +181,5 @@ Host my-gerrit
 5. **Production Ready**: Comprehensive testing and error handling
 6. **Secure**: Proper credential handling and connection management
 
-The SSH authentication implementation is now complete and production-ready, providing transparent SSH support that integrates seamlessly with existing SSH infrastructure while maintaining the same ease-of-use as the original HTTPS-based authentication.
+The SSH authentication implementation is now complete and production-ready, providing transparent SSH support that integrates
+seamlessly with existing SSH infrastructure while maintaining the same ease-of-use as the original HTTPS-based authentication.

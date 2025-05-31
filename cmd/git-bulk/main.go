@@ -1,0 +1,290 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/clone"
+	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/config"
+	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/provider"
+	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/worker"
+	"github.com/spf13/cobra"
+)
+
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
+type Config struct {
+	OutputDir       string
+	Workers         int
+	MaxRetries      int
+	RetryDelay      time.Duration
+	QueueSize       int
+	Timeout         time.Duration
+	UseSSH          bool
+	DryRun          bool
+	Verbose         bool
+	MaxRepos        int
+	GitHubToken     string
+	GitLabToken     string
+	GerritUser      string
+	GerritPass      string
+	GerritToken     string
+	CredentialsFile string
+}
+
+func main() {
+	var cfg Config
+
+	rootCmd := &cobra.Command{
+		Use:   "git-bulk",
+		Short: "Bulk Git repository operations tool",
+		Long: `git-bulk is a tool for performing bulk operations on Git repositories
+across multiple hosting providers including GitHub, GitLab, and Gerrit.`,
+		Version: fmt.Sprintf("%s (commit: %s, built: %s)", version, commit, date),
+	}
+
+	cloneCmd := &cobra.Command{
+		Use:   "clone <source>",
+		Short: "Clone repositories from a Git hosting provider",
+		Long: `Clone repositories from GitHub, GitLab, or Gerrit.
+
+Examples:
+  git-bulk clone github.com/myorg                    # Clone all repos from GitHub org
+  git-bulk clone gitlab.com/mygroup                  # Clone all repos from GitLab group
+  git-bulk clone https://gerrit.example.com          # Clone all repos from Gerrit
+  git-bulk clone git@github.com:myorg/myrepo.git     # Clone specific repo
+  git-bulk clone github.com/myorg --dry-run          # Show what would be cloned
+  git-bulk clone github.com/myorg --ssh              # Use SSH for cloning
+  git-bulk clone github.com/myorg --max-repos 10     # Limit to 10 repositories`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runClone(cfg, args[0])
+		},
+	}
+
+	// Global flags
+	rootCmd.PersistentFlags().BoolVarP(&cfg.Verbose, "verbose", "v", false, "Enable verbose output")
+	rootCmd.PersistentFlags().DurationVar(&cfg.Timeout, "timeout", 30*time.Minute, "Overall operation timeout")
+
+	// Clone command flags
+	cloneCmd.Flags().StringVarP(&cfg.OutputDir, "output", "o", ".", "Output directory for cloned repositories")
+	cloneCmd.Flags().IntVarP(&cfg.Workers, "workers", "w", 4, "Number of concurrent workers")
+	cloneCmd.Flags().IntVar(&cfg.MaxRetries, "max-retries", 3, "Maximum number of retries per repository")
+	cloneCmd.Flags().DurationVar(&cfg.RetryDelay, "retry-delay", 5*time.Second, "Delay between retries")
+	cloneCmd.Flags().IntVar(&cfg.QueueSize, "queue-size", 100, "Worker queue size")
+	cloneCmd.Flags().BoolVar(&cfg.UseSSH, "ssh", false, "Use SSH for cloning")
+	cloneCmd.Flags().BoolVar(&cfg.DryRun, "dry-run", false, "Show what would be done without actually doing it")
+	cloneCmd.Flags().IntVar(&cfg.MaxRepos, "max-repos", 0, "Maximum number of repositories to process (0 = unlimited)")
+
+	// Authentication flags
+	cloneCmd.Flags().StringVar(&cfg.GitHubToken, "github-token", "", "GitHub personal access token (or set GITHUB_TOKEN)")
+	cloneCmd.Flags().StringVar(&cfg.GitLabToken, "gitlab-token", "", "GitLab personal access token (or set GITLAB_TOKEN)")
+	cloneCmd.Flags().StringVar(&cfg.GerritUser, "gerrit-user", "", "Gerrit username (or set GERRIT_USERNAME)")
+	cloneCmd.Flags().StringVar(&cfg.GerritPass, "gerrit-pass", "", "Gerrit password (or set GERRIT_PASSWORD)")
+	cloneCmd.Flags().StringVar(&cfg.GerritToken, "gerrit-token", "", "Gerrit token (or set GERRIT_TOKEN)")
+	cloneCmd.Flags().StringVar(&cfg.CredentialsFile, "credentials-file", "", "Path to credentials file (default: auto-detect)")
+
+	rootCmd.AddCommand(cloneCmd)
+
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func runClone(cfg Config, source string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	defer cancel()
+
+	// Load credentials from file if available
+	var credentialsLoader *config.CredentialsLoader
+	if cfg.CredentialsFile != "" {
+		credentialsLoader = config.NewCredentialsLoader(cfg.CredentialsFile)
+	} else {
+		// Auto-detect credentials file
+		if credentialsPath := config.FindCredentialsFile(); credentialsPath != "" {
+			credentialsLoader = config.NewCredentialsLoader(credentialsPath)
+			if cfg.Verbose {
+				fmt.Printf("Using credentials file: %s\n", credentialsPath)
+			}
+		} else {
+			credentialsLoader = config.NewCredentialsLoader("")
+		}
+	}
+
+	if err := credentialsLoader.LoadCredentials(); err != nil {
+		return fmt.Errorf("failed to load credentials: %w", err)
+	}
+
+	// Get authentication from flags, credentials file, or environment (in that order)
+	if cfg.GitHubToken == "" {
+		cfg.GitHubToken = credentialsLoader.GetCredential("GITHUB_TOKEN")
+	}
+	if cfg.GitLabToken == "" {
+		cfg.GitLabToken = credentialsLoader.GetCredential("GITLAB_TOKEN")
+	}
+	if cfg.GerritUser == "" {
+		cfg.GerritUser = credentialsLoader.GetCredential("GERRIT_USERNAME")
+	}
+	if cfg.GerritPass == "" {
+		cfg.GerritPass = credentialsLoader.GetCredential("GERRIT_PASSWORD")
+	}
+	if cfg.GerritToken == "" {
+		cfg.GerritToken = credentialsLoader.GetCredential("GERRIT_TOKEN")
+	}
+
+	// Show credential status in verbose mode
+	if cfg.Verbose {
+		credentials := credentialsLoader.ListCredentials()
+		fmt.Println("Credential status:")
+		for cred, available := range credentials {
+			status := "❌"
+			if available {
+				status = "✅"
+			}
+			fmt.Printf("  %s %s\n", status, cred)
+		}
+		fmt.Println()
+	}
+
+	// Create provider manager
+	providerConfig := &provider.Config{
+		GitHubToken:    cfg.GitHubToken,
+		GitLabToken:    cfg.GitLabToken,
+		GerritUsername: cfg.GerritUser,
+		GerritPassword: cfg.GerritPass,
+		GerritToken:    cfg.GerritToken,
+	}
+
+	manager := provider.NewProviderManager(providerConfig)
+
+	// Register providers - always register GitHub and GitLab for maximum compatibility
+	if githubProvider, err := provider.NewGitHubProvider(cfg.GitHubToken, ""); err == nil {
+		manager.RegisterProvider("github", githubProvider)
+	}
+
+	if gitlabProvider, err := provider.NewGitLabProvider(cfg.GitLabToken, ""); err == nil {
+		manager.RegisterProvider("gitlab", gitlabProvider)
+	}
+
+	// Only register Gerrit if credentials are provided or source suggests Gerrit
+	if cfg.GerritUser != "" || strings.Contains(source, "gerrit") {
+		if gerritProvider, err := provider.NewGerritProvider("", cfg.GerritUser, cfg.GerritPass); err == nil {
+			manager.RegisterProvider("gerrit", gerritProvider)
+		}
+	}
+
+	// Get provider for source
+	prov, sourceInfo, err := manager.GetProviderForSource(source)
+	if err != nil {
+		return fmt.Errorf("failed to get provider for source %s: %w", source, err)
+	}
+
+	if cfg.Verbose {
+		fmt.Printf("Using provider: %s\n", prov.Name())
+		fmt.Printf("Host: %s\n", sourceInfo.Host)
+		fmt.Printf("Organization: %s\n", sourceInfo.Organization)
+		if sourceInfo.Path != "" {
+			fmt.Printf("Path: %s\n", sourceInfo.Path)
+		}
+	}
+
+	// List repositories
+	fmt.Printf("Fetching repositories from %s...\n", sourceInfo.Host)
+	repos, err := prov.ListRepositories(ctx, sourceInfo.Organization)
+	if err != nil {
+		return fmt.Errorf("failed to list repositories: %w", err)
+	}
+
+	if len(repos) == 0 {
+		fmt.Println("No repositories found.")
+		return nil
+	}
+
+	// Apply max repos limit
+	if cfg.MaxRepos > 0 && len(repos) > cfg.MaxRepos {
+		repos = repos[:cfg.MaxRepos]
+		fmt.Printf("Limited to %d repositories.\n", cfg.MaxRepos)
+	}
+
+	fmt.Printf("Found %d repositories.\n", len(repos))
+
+	if cfg.DryRun {
+		fmt.Println("\nDry run - repositories that would be cloned:")
+		for _, repo := range repos {
+			cloneURL := repo.CloneURL
+			if cfg.UseSSH && repo.SSHCloneURL != "" {
+				cloneURL = repo.SSHCloneURL
+			}
+			fmt.Printf("  %s -> %s\n", repo.FullName, cloneURL)
+		}
+		return nil
+	}
+
+	// Create clone manager
+	workerConfig := &worker.Config{
+		WorkerCount:   cfg.Workers,
+		MaxRetries:    cfg.MaxRetries,
+		RetryDelay:    cfg.RetryDelay,
+		QueueSize:     cfg.QueueSize,
+		LogVerbose:    cfg.Verbose,
+		BackoffFactor: 2.0,
+	}
+
+	cloneConfig := &clone.Config{
+		WorkerConfig:   workerConfig,
+		ContinueOnFail: true,
+	}
+
+	cloneManager := clone.NewManager(cloneConfig, prov, sourceInfo)
+
+	// Ensure output directory exists
+	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+	// Start cloning
+	fmt.Printf("Cloning repositories to %s...\n", cfg.OutputDir)
+	results, err := cloneManager.CloneRepositories(ctx, repos, cfg.OutputDir, false, cfg.UseSSH)
+	if err != nil {
+		return fmt.Errorf("clone operation failed: %w", err)
+	}
+
+	// Print results
+	successful := 0
+	failed := 0
+
+	for _, result := range results {
+		if result.Error != nil {
+			failed++
+			if cfg.Verbose {
+				fmt.Printf("✗ %s: %v\n", result.Repository.FullName, result.Error)
+			}
+		} else {
+			successful++
+			if cfg.Verbose {
+				fmt.Printf("✓ %s -> %s\n", result.Repository.FullName,
+					filepath.Join(cfg.OutputDir, result.Repository.Name))
+			}
+		}
+	}
+
+	fmt.Printf("\nClone complete: %d successful, %d failed\n", successful, failed)
+
+	if failed > 0 {
+		return fmt.Errorf("%d repositories failed to clone", failed)
+	}
+
+	return nil
+}

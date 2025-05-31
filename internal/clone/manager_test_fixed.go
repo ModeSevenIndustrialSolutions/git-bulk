@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/provider"
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/worker"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/provider"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/worker"
 )
 
 // TestManagerCloneRepositories tests the basic cloning functionality

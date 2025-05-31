@@ -16,9 +16,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/provider"
-	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/worker"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/provider"
+	sshauth "github.com/ModeSevenIndustrialSolutions/git-bulk/internal/ssh"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/worker"
 )
 
 // Config holds configuration for clone operations

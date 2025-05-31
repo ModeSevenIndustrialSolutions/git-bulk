@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/clone"
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/config"
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/provider"
-	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
-	"github.com/modesevenindustrialsolutions/go-bulk-git/internal/worker"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/clone"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/config"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/provider"
+	sshauth "github.com/ModeSevenIndustrialSolutions/git-bulk/internal/ssh"
+	"github.com/ModeSevenIndustrialSolutions/git-bulk/internal/worker"
 	"github.com/spf13/cobra"
 )
 

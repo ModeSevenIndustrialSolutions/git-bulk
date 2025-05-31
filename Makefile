@@ -98,7 +98,40 @@ vet:
 # Install the binary
 install: build
 	@echo "Installing $(BINARY_NAME)..."
-	cp $(BUILD_DIR)/$(BINARY_NAME) $(GOPATH)/bin/$(BINARY_NAME)
+	@if [ -n "$(GOPATH)" ]; then \
+		mkdir -p $(GOPATH)/bin && cp $(BUILD_DIR)/$(BINARY_NAME) $(GOPATH)/bin/$(BINARY_NAME); \
+	elif [ -n "$(GOBIN)" ]; then \
+		mkdir -p $(GOBIN) && cp $(BUILD_DIR)/$(BINARY_NAME) $(GOBIN)/$(BINARY_NAME); \
+	else \
+		mkdir -p $(HOME)/go/bin && cp $(BUILD_DIR)/$(BINARY_NAME) $(HOME)/go/bin/$(BINARY_NAME); \
+	fi
+	@echo "$(BINARY_NAME) installed successfully"
+
+# Install system-wide (requires sudo on most systems)
+install-system: build
+	@echo "Installing $(BINARY_NAME) system-wide..."
+	@if [ "$(shell uname)" = "Darwin" ]; then \
+		sudo cp $(BUILD_DIR)/$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME); \
+	else \
+		sudo cp $(BUILD_DIR)/$(BINARY_NAME) /usr/bin/$(BINARY_NAME); \
+	fi
+	@echo "$(BINARY_NAME) installed system-wide successfully"
+
+# Uninstall the binary
+uninstall:
+	@echo "Uninstalling $(BINARY_NAME)..."
+	@rm -f $(GOPATH)/bin/$(BINARY_NAME) $(GOBIN)/$(BINARY_NAME) $(HOME)/go/bin/$(BINARY_NAME)
+	@echo "$(BINARY_NAME) uninstalled successfully"
+
+# Uninstall system-wide
+uninstall-system:
+	@echo "Uninstalling $(BINARY_NAME) system-wide..."
+	@if [ "$(shell uname)" = "Darwin" ]; then \
+		sudo rm -f /usr/local/bin/$(BINARY_NAME); \
+	else \
+		sudo rm -f /usr/bin/$(BINARY_NAME); \
+	fi
+	@echo "$(BINARY_NAME) uninstalled system-wide successfully"
 
 # Run the application
 run: build
@@ -150,7 +183,10 @@ help:
 	@echo "  lint          - Run linting"
 	@echo "  fmt           - Format code"
 	@echo "  vet           - Run go vet"
-	@echo "  install       - Install the binary"
+	@echo "  install       - Install the binary to Go bin path"
+	@echo "  install-system - Install the binary system-wide (requires sudo)"
+	@echo "  uninstall     - Uninstall the binary"
+	@echo "  uninstall-system - Uninstall the binary system-wide (requires sudo)"
 	@echo "  run           - Build and run the application"
 	@echo "  dev-setup     - Set up development environment"
 	@echo "  security      - Run security check"

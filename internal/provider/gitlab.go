@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	sshauth "github.com/modesevenindustrialsolutions/go-bulk-git/internal/ssh"
+	sshauth "github.com/ModeSevenIndustrialSolutions/git-bulk/internal/ssh"
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/time/rate"

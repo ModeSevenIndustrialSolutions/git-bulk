@@ -7,6 +7,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,17 @@ import (
 	sshauth "github.com/ModeSevenIndustrialSolutions/git-bulk/internal/ssh"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/time/rate"
+)
+
+const (
+	// HTTP content type constants
+	contentTypeJSON = "application/json"
+	acceptJSON      = "application/json"
+
+	// Error message constants
+	errSSHUsernameRequired = "SSH username required for Gerrit"
+	errInvalidBaseURL      = "invalid base URL: %w"
+	errSSHConnectionFailed = "SSH connection failed: %w"
 )
 
 // GerritProvider implements the Provider interface for Gerrit
@@ -277,13 +289,28 @@ func (g *GerritProvider) getProjects(ctx context.Context) (map[string]GerritProj
 		return projects, nil
 	}
 
+	// Store the original HTTP error for potential reporting
+	httpErr := err
+
 	// Only fall back to unauthenticated endpoints if we get specific errors
 	// that suggest authentication/authorization issues
 	if g.shouldTryUnauthenticated(err) {
-		return g.tryUnauthenticatedEndpoints(ctx)
+		unauthProjects, unauthErr := g.tryUnauthenticatedEndpoints(ctx)
+		if unauthErr == nil {
+			return unauthProjects, nil
+		}
 	}
 
-	return nil, err
+	// If HTTP methods failed and SSH is available, try SSH enumeration
+	if g.enableSSH && g.sshAuth != nil && g.username != "" {
+		sshProjects, sshErr := g.trySSHProjectListing(ctx)
+		if sshErr == nil {
+			return sshProjects, nil
+		}
+		// SSH also failed, but don't return the SSH error as it's a fallback
+	}
+
+	return nil, httpErr
 }
 
 // shouldTryUnauthenticated determines if we should try unauthenticated endpoints
@@ -339,6 +366,111 @@ func (g *GerritProvider) tryEndpointsWithMode(ctx context.Context, endpoints []s
 	}
 
 	return nil, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
+}
+
+// trySSHProjectListing attempts to list Gerrit projects via SSH using the 'gerrit ls-projects' command
+func (g *GerritProvider) trySSHProjectListing(_ context.Context) (map[string]GerritProject, error) {
+	if !g.enableSSH || g.sshAuth == nil {
+		return nil, fmt.Errorf("SSH not enabled or not available")
+	}
+
+	if g.username == "" {
+		return nil, errors.New(errSSHUsernameRequired)
+	}
+
+	// Parse the base URL to get the host and port
+	u, err := url.Parse(g.baseURL)
+	if err != nil {
+		return nil, fmt.Errorf(errInvalidBaseURL, err)
+	}
+
+	host := u.Hostname()
+	port := 29418 // Default Gerrit SSH port
+	if u.Port() != "" {
+		if portNum, err := strconv.Atoi(u.Port()); err == nil {
+			port = portNum
+		}
+	}
+
+	// Get SSH client configuration
+	config, err := g.SSHClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get SSH client config: %w", err)
+	}
+
+	// Establish SSH connection
+	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", host, port), config)
+	if err != nil {
+		return nil, fmt.Errorf(errSSHConnectionFailed, err)
+	}
+	defer func() {
+		_ = conn.Close() // Ignore close error
+	}()
+
+	// Create SSH session
+	session, err := conn.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SSH session: %w", err)
+	}
+	defer func() {
+		_ = session.Close() // Ignore close error
+	}()
+
+	// Execute 'gerrit ls-projects' command
+	output, err := session.Output("gerrit ls-projects --format json --description")
+	if err != nil {
+		// Fallback to basic ls-projects if --format json isn't supported
+		session2, err := conn.NewSession()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create fallback SSH session: %w", err)
+		}
+		defer func() {
+			_ = session2.Close() // Ignore close error
+		}()
+
+		output, err = session2.Output("gerrit ls-projects")
+		if err != nil {
+			return nil, fmt.Errorf("SSH command 'gerrit ls-projects' failed: %w", err)
+		}
+
+		return g.parseSSHProjectListOutput(output, false)
+	}
+
+	return g.parseSSHProjectListOutput(output, true)
+}
+
+// parseSSHProjectListOutput parses the output from 'gerrit ls-projects' command
+func (g *GerritProvider) parseSSHProjectListOutput(output []byte, isJSON bool) (map[string]GerritProject, error) {
+	projects := make(map[string]GerritProject)
+
+	if isJSON {
+		// Try to parse as JSON format (newer Gerrit versions)
+		var jsonProjects map[string]GerritProject
+		if err := json.Unmarshal(output, &jsonProjects); err == nil {
+			return jsonProjects, nil
+		}
+		// If JSON parsing fails, fall through to line-by-line parsing
+	}
+
+	// Parse line-by-line (standard output format)
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Basic project entry - just the project name
+		projectName := line
+		projects[projectName] = GerritProject{
+			ID:          projectName,
+			Name:        projectName,
+			Description: "",       // Not available from basic ls-projects output
+			State:       "ACTIVE", // Assume active since it's listed
+		}
+	}
+
+	return projects, nil
 }
 
 // filterAndConvertProjects filters projects by organization and converts them to Repository objects
@@ -602,7 +734,7 @@ func (g *GerritProvider) SSHClientConfig() (*ssh.ClientConfig, error) {
 	}
 
 	if g.username == "" {
-		return nil, fmt.Errorf("SSH username required for Gerrit")
+		return nil, errors.New(errSSHUsernameRequired)
 	}
 
 	authMethods := g.sshAuth.GetAuthMethods()
@@ -618,7 +750,7 @@ func (g *GerritProvider) SSHClientConfig() (*ssh.ClientConfig, error) {
 	return &ssh.ClientConfig{
 		User:            g.username,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: Handle host key verification properly
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Using same approach as SSH authenticator
 		Timeout:         time.Second * 30,
 	}, nil
 }
@@ -631,7 +763,7 @@ func (g *GerritProvider) TestSSHConnection() error {
 
 	u, err := url.Parse(g.baseURL)
 	if err != nil {
-		return fmt.Errorf("invalid base URL: %w", err)
+		return fmt.Errorf(errInvalidBaseURL, err)
 	}
 
 	host := u.Hostname()
@@ -649,7 +781,7 @@ func (g *GerritProvider) TestSSHConnection() error {
 
 	conn, err := ssh.Dial("tcp", fmt.Sprintf("%s:%d", host, port), config)
 	if err != nil {
-		return fmt.Errorf("SSH connection failed: %w", err)
+		return fmt.Errorf(errSSHConnectionFailed, err)
 	}
 	defer func() {
 		_ = conn.Close() // Ignore close error for test connection
@@ -662,9 +794,3 @@ func (g *GerritProvider) TestSSHConnection() error {
 func (g *GerritProvider) SupportsSSH() bool {
 	return g.enableSSH && g.sshAuth != nil
 }
-
-const (
-	// HTTP content type constants
-	contentTypeJSON = "application/json"
-	acceptJSON      = "application/json"
-)

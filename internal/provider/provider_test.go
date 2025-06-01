@@ -308,9 +308,12 @@ func TestParseURL(t *testing.T) {
 			hasError: true,
 		},
 		{
-			name:     "URL with no path",
-			url:      "https://example.com",
-			hasError: true,
+			name: "URL with no path (defaults to Gerrit)",
+			url:  "https://example.com",
+			expected: &SourceInfo{
+				Provider: "gerrit",
+				Host:     "example.com",
+			},
 		},
 	}
 

@@ -252,11 +252,9 @@ func parseURL(source string) (*SourceInfo, error) {
 	case strings.Contains(hostname, "gerrit"):
 		providerName = "gerrit"
 	default:
-		// For unknown hosts, we can't determine the provider and require at least one path component
-		if len(nonEmptyParts) < 1 {
-			return nil, fmt.Errorf("invalid URL path: %s", u.Path)
-		}
-		providerName = "gerrit" // Default to Gerrit for unknown hosts with paths
+		// For unknown hosts, default to Gerrit (most flexible)
+		// This allows empty paths to mean "list all projects"
+		providerName = "gerrit"
 	}
 
 	// For GitHub and GitLab, we require at least one path component (org/user)

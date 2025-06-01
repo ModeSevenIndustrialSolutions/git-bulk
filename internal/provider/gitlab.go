@@ -271,8 +271,22 @@ func (g *GitLabProvider) ListRepositories(ctx context.Context, groupName string)
 		return repos, nil
 	}
 
+	// Store the group error for potential fallback context
+	groupErr := err
+
 	// If that fails, try to get user projects
-	return g.listUserProjects(ctx, groupName)
+	userRepos, userErr := g.listUserProjects(ctx, groupName)
+	if userErr == nil {
+		return userRepos, nil
+	}
+
+	// Both failed - provide helpful error message
+	if strings.Contains(groupErr.Error(), "401") || strings.Contains(groupErr.Error(), "403") {
+		return nil, fmt.Errorf("failed to access GitLab group '%s': authentication required. Please provide a GitLab token with --gitlab-token or set GITLAB_TOKEN environment variable", groupName)
+	}
+
+	// Return the group error as it's more likely to be the intended target
+	return nil, fmt.Errorf("failed to list repositories from GitLab group '%s': %w", groupName, groupErr)
 }
 
 func (g *GitLabProvider) listGroupProjects(ctx context.Context, groupName string) ([]*Repository, error) {
@@ -285,7 +299,17 @@ func (g *GitLabProvider) listGroupProjects(ctx context.Context, groupName string
 		IncludeSubGroups: gitlab.Ptr(true),
 	}
 
+	maxPages := 50 // Limit to prevent hanging on huge organizations
+	pageCount := 0
+
 	for {
+		// Check context for cancellation/timeout
+		select {
+		case <-ctx.Done():
+			return allRepos, ctx.Err()
+		default:
+		}
+
 		if err := g.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
@@ -299,7 +323,13 @@ func (g *GitLabProvider) listGroupProjects(ctx context.Context, groupName string
 			allRepos = append(allRepos, g.convertProject(project))
 		}
 
-		if resp.NextPage == 0 {
+		pageCount++
+		if resp.NextPage == 0 || pageCount >= maxPages {
+			if pageCount >= maxPages {
+				// Log that we've hit the limit
+				fmt.Printf("Warning: Limited to %d pages (%d repositories) for large organization %s\n",
+					maxPages, len(allRepos), groupName)
+			}
 			break
 		}
 		opts.Page = resp.NextPage
@@ -332,7 +362,17 @@ func (g *GitLabProvider) listUserProjects(ctx context.Context, username string) 
 		Owned: gitlab.Ptr(true),
 	}
 
+	maxPages := 50 // Limit to prevent hanging on huge users
+	pageCount := 0
+
 	for {
+		// Check context for cancellation/timeout
+		select {
+		case <-ctx.Done():
+			return allRepos, ctx.Err()
+		default:
+		}
+
 		if err := g.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
@@ -346,7 +386,13 @@ func (g *GitLabProvider) listUserProjects(ctx context.Context, username string) 
 			allRepos = append(allRepos, g.convertProject(project))
 		}
 
-		if resp.NextPage == 0 {
+		pageCount++
+		if resp.NextPage == 0 || pageCount >= maxPages {
+			if pageCount >= maxPages {
+				// Log that we've hit the limit
+				fmt.Printf("Warning: Limited to %d pages (%d repositories) for large user %s\n",
+					maxPages, len(allRepos), username)
+			}
 			break
 		}
 		opts.Page = resp.NextPage

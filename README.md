@@ -61,15 +61,17 @@ git-bulk clone github.com/myorg --max-repos 10 --output ./repos
 git-bulk clone github.com/myorg --credentials-file ./my-credentials --output ./repos
 ```
 
-### Fork repositories to another organization
+### Fork repositories to another organization (Planned Feature)
 
 ```bash
-# Fork all repositories from source to target GitHub organization
+# Fork all repositories from source to target GitHub organization (Coming Soon)
 git-bulk clone --source github.com/sourceorg --target github.com/targetorg
 
-# Enable sync mode to update existing forks
+# Enable sync mode to update existing forks (Coming Soon)
 git-bulk clone --source github.com/sourceorg --target github.com/targetorg --sync
 ```
+
+> **Note:** The fork functionality is currently under development. The `--source` and `--target` flags are available but the forking implementation is not yet complete.
 
 ### Configuration
 
@@ -266,4 +268,4 @@ make security
 
 ## License
 
-MIT License - see LICENSE file for details.
+Apache-2.0 License - see LICENSE file for details.

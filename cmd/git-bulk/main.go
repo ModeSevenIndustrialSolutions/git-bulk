@@ -43,6 +43,9 @@ type Config struct {
 	GerritPass      string
 	GerritToken     string
 	CredentialsFile string
+	SourceOrg       string
+	TargetOrg       string
+	SyncMode        bool
 }
 
 func main() {
@@ -57,7 +60,7 @@ across multiple hosting providers including GitHub, GitLab, and Gerrit.`,
 	}
 
 	cloneCmd := &cobra.Command{
-		Use:   "clone <source>",
+		Use:   "clone [<source>]",
 		Short: "Clone repositories from a Git hosting provider",
 		Long: `Clone repositories from GitHub, GitLab, or Gerrit.
 
@@ -68,10 +71,15 @@ Examples:
   git-bulk clone git@github.com:myorg/myrepo.git     # Clone specific repo
   git-bulk clone github.com/myorg --dry-run          # Show what would be cloned
   git-bulk clone github.com/myorg --ssh              # Use SSH for cloning
-  git-bulk clone github.com/myorg --max-repos 10     # Limit to 10 repositories`,
-		Args: cobra.ExactArgs(1),
+  git-bulk clone github.com/myorg --max-repos 10     # Limit to 10 repositories
+  git-bulk clone --source github.com/sourceorg --target github.com/targetorg  # Fork repositories`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runClone(cfg, args[0])
+			var source string
+			if len(args) > 0 {
+				source = args[0]
+			}
+			return runClone(cfg, source)
 		},
 	}
 
@@ -116,6 +124,11 @@ Examples:
 	cloneCmd.Flags().StringVar(&cfg.GerritToken, "gerrit-token", "", "Gerrit token (or set GERRIT_TOKEN)")
 	cloneCmd.Flags().StringVar(&cfg.CredentialsFile, "credentials-file", "", "Path to credentials file (default: auto-detect)")
 
+	// Fork/sync flags
+	cloneCmd.Flags().StringVar(&cfg.SourceOrg, "source", "", "Source organization/user to fork from")
+	cloneCmd.Flags().StringVar(&cfg.TargetOrg, "target", "", "Target organization to fork to (requires --source)")
+	cloneCmd.Flags().BoolVar(&cfg.SyncMode, "sync", false, "Update existing forks (use with --target)")
+
 	rootCmd.AddCommand(cloneCmd, sshCmd)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -126,6 +139,55 @@ Examples:
 func runClone(cfg Config, source string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
+
+	// Validate input arguments
+	if cfg.SourceOrg != "" && cfg.TargetOrg == "" {
+		return fmt.Errorf("--target is required when using --source")
+	}
+	if cfg.TargetOrg != "" && cfg.SourceOrg == "" {
+		return fmt.Errorf("--source is required when using --target")
+	}
+	if cfg.SyncMode && cfg.TargetOrg == "" {
+		return fmt.Errorf("--sync can only be used with --target")
+	}
+	if cfg.SourceOrg != "" && source != "" {
+		return fmt.Errorf("cannot specify both <source> argument and --source flag")
+	}
+	if cfg.SourceOrg == "" && source == "" {
+		return fmt.Errorf("must specify either <source> argument or --source flag")
+	}
+
+	// Use source flag if provided, otherwise use positional argument
+	if cfg.SourceOrg != "" {
+		source = cfg.SourceOrg
+	}
+
+	// Fork mode vs regular clone mode
+	if cfg.TargetOrg != "" {
+		return runForkMode(ctx, cfg, source)
+	}
+
+	return runRegularClone(ctx, cfg, source)
+}
+
+func runForkMode(ctx context.Context, cfg Config, source string) error {
+	fmt.Printf("Fork mode: %s -> %s\n", source, cfg.TargetOrg)
+	if cfg.SyncMode {
+		fmt.Println("Sync mode enabled: will update existing forks")
+	}
+
+	// TODO: Implement fork functionality
+	// This would involve:
+	// 1. List repositories from source organization
+	// 2. For each repository, check if fork already exists in target org
+	// 3. If not exists, create fork
+	// 4. If exists and sync mode is enabled, update the fork
+	// 5. Clone the forked repository to local directory
+
+	return fmt.Errorf("fork functionality not yet implemented")
+}
+
+func runRegularClone(ctx context.Context, cfg Config, source string) error {
 
 	// Load credentials from file if available
 	var credentialsLoader *config.CredentialsLoader

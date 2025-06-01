@@ -122,7 +122,7 @@ repos:
     rev: v1.55.2
     hooks:
       - id: golangci-lint
-        args: ["--timeout=5m"]
+        args: ["--timeout=1m"]
         pass_filenames: false
 
   - repo: local

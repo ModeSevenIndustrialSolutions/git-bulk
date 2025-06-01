@@ -71,7 +71,8 @@ git-bulk clone --source github.com/sourceorg --target github.com/targetorg
 git-bulk clone --source github.com/sourceorg --target github.com/targetorg --sync
 ```
 
-> **Note:** The fork functionality is currently under development. The `--source` and `--target` flags are available but the forking implementation is not yet complete.
+> **Note:** The fork functionality is currently under development. The `--source` and `--target` flags are available but the
+> forking implementation is not yet complete.
 
 ### Configuration
 

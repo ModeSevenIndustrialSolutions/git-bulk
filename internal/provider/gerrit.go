@@ -320,12 +320,13 @@ func (g *GerritProvider) shouldTryUnauthenticated(err error) bool {
 		return false
 	}
 
-	errStr := err.Error()
-	// Try unauthenticated if we get HTML responses, auth errors, or 401/403 status codes
-	return strings.Contains(errStr, "received HTML response") ||
+	errStr := strings.ToLower(err.Error())
+	// Try unauthenticated if we get HTML responses, auth errors, missing security prefix, or 401/403 status codes
+	return strings.Contains(errStr, "received html response") ||
 		strings.Contains(errStr, "authentication") ||
 		strings.Contains(errStr, "unauthorized") ||
-		strings.Contains(errStr, "forbidden")
+		strings.Contains(errStr, "forbidden") ||
+		strings.Contains(errStr, "missing security prefix")
 }
 
 // tryAuthenticatedEndpoints tries authenticated API endpoints

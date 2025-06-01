@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -544,6 +545,89 @@ func TestNewGerritProvider(t *testing.T) {
 			}
 			if provider.password != tt.password {
 				t.Errorf("Expected password %s, got %s", tt.password, provider.password)
+			}
+		})
+	}
+}
+
+func TestGerritProvider_ShouldTryUnauthenticated(t *testing.T) {
+	provider, err := NewGerritProvider("https://gerrit.example.com", "", "")
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "nil error should not trigger unauthenticated",
+			err:      nil,
+			expected: false,
+		},
+		{
+			name:     "missing security prefix error should trigger unauthenticated",
+			err:      fmt.Errorf("failed to parse response: invalid Gerrit response: missing security prefix"),
+			expected: true,
+		},
+		{
+			name:     "HTML response error should trigger unauthenticated",
+			err:      fmt.Errorf("received HTML response instead of JSON"),
+			expected: true,
+		},
+		{
+			name:     "authentication error should trigger unauthenticated",
+			err:      fmt.Errorf("authentication failed"),
+			expected: true,
+		},
+		{
+			name:     "unauthorized error should trigger unauthenticated",
+			err:      fmt.Errorf("request unauthorized"),
+			expected: true,
+		},
+		{
+			name:     "forbidden error should trigger unauthenticated",
+			err:      fmt.Errorf("access forbidden"),
+			expected: true,
+		},
+		{
+			name:     "case insensitive missing security prefix should trigger unauthenticated",
+			err:      fmt.Errorf("Missing Security Prefix detected"),
+			expected: true,
+		},
+		{
+			name:     "partial missing security prefix should trigger unauthenticated",
+			err:      fmt.Errorf("some other error: missing security prefix in response"),
+			expected: true,
+		},
+		{
+			name:     "generic network error should not trigger unauthenticated",
+			err:      fmt.Errorf("network connection failed"),
+			expected: false,
+		},
+		{
+			name:     "timeout error should not trigger unauthenticated",
+			err:      fmt.Errorf("request timeout"),
+			expected: false,
+		},
+		{
+			name:     "JSON parse error should not trigger unauthenticated",
+			err:      fmt.Errorf("invalid JSON format"),
+			expected: false,
+		},
+		{
+			name:     "combined errors with missing security prefix should trigger unauthenticated",
+			err:      fmt.Errorf("failed to connect: server returned missing security prefix"),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := provider.shouldTryUnauthenticated(tt.err)
+			if result != tt.expected {
+				t.Errorf("shouldTryUnauthenticated(%v) = %v, expected %v", tt.err, result, tt.expected)
 			}
 		})
 	}

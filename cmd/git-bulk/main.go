@@ -247,6 +247,7 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		GerritUsername: cfg.GerritUser,
 		GerritPassword: cfg.GerritPass,
 		GerritToken:    cfg.GerritToken,
+		EnableSSH:      cfg.UseSSH,
 	}
 
 	manager := provider.NewProviderManager(providerConfig)
@@ -272,18 +273,8 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		}
 	}
 
-	// Only register Gerrit if credentials are provided or source suggests Gerrit
-	if cfg.GerritUser != "" || strings.Contains(source, "gerrit") {
-		if cfg.UseSSH {
-			if gerritProvider, err := provider.NewGerritProviderWithSSH("", cfg.GerritUser, cfg.GerritPass, true); err == nil {
-				manager.RegisterProvider("gerrit", gerritProvider)
-			}
-		} else {
-			if gerritProvider, err := provider.NewGerritProvider("", cfg.GerritUser, cfg.GerritPass); err == nil {
-				manager.RegisterProvider("gerrit", gerritProvider)
-			}
-		}
-	}
+	// Don't pre-register Gerrit providers with empty URLs - let GetProviderForSource handle dynamic creation
+	// This allows proper baseURL setting and SSH fallback to work correctly
 
 	// Get provider for source
 	prov, sourceInfo, err := manager.GetProviderForSource(source)

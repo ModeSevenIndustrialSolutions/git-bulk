@@ -115,6 +115,7 @@ type Config struct {
 	GerritUsername string
 	GerritPassword string
 	GerritToken    string
+	EnableSSH      bool // Enable SSH for dynamically created providers
 }
 
 // Manager manages multiple Git hosting providers
@@ -160,7 +161,7 @@ func (pm *Manager) GetProviderForSource(source string) (Provider, *SourceInfo, e
 		// If the generic parser determined it's a gerrit provider or unknown, try creating a Gerrit provider
 		if sourceInfo.Provider == "gerrit" || sourceInfo.Provider == "" {
 			baseURL := "https://" + sourceInfo.Host
-			gerritProvider, err := NewGerritProvider(baseURL, pm.config.GerritUsername, pm.config.GerritPassword)
+			gerritProvider, err := NewGerritProviderWithSSH(baseURL, pm.config.GerritUsername, pm.config.GerritPassword, pm.config.EnableSSH)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to create Gerrit provider for %s: %w", sourceInfo.Host, err)
 			}

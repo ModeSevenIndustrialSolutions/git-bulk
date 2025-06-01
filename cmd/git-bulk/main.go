@@ -359,13 +359,12 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 	// Print results
 	fmt.Println("\nClone results:")
 	for _, result := range results {
-		status := "✅"
 		if result.Error != nil {
-			status = "❌"
-		}
-		fmt.Printf("  %s: %s\n", status, result.Repository.FullName)
-		if result.Error != nil {
-			fmt.Printf("    Error: %v\n", result.Error)
+			// Format error for concise display
+			errorMsg := formatErrorMessage(result.Error)
+			fmt.Printf("❌ %s [%s]\n", result.Repository.FullName, errorMsg)
+		} else {
+			fmt.Printf("✅ %s\n", result.Repository.FullName)
 		}
 	}
 
@@ -414,4 +413,42 @@ func runSSHSetup(cfg Config) error {
 	}
 
 	return nil
+}
+
+// formatErrorMessage formats an error message for concise display
+func formatErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	errStr := err.Error()
+
+	// Handle common error patterns
+	if strings.Contains(errStr, "repository was not processed") {
+		return "not processed - check worker queue and concurrency settings"
+	}
+
+	if strings.Contains(errStr, "exists and is not empty") {
+		return "failed, destination path exists and is not empty"
+	}
+
+	if strings.Contains(errStr, "authentication failed") {
+		return "authentication failed"
+	}
+
+	if strings.Contains(errStr, "repository not found") {
+		return "repository not found"
+	}
+
+	if strings.Contains(errStr, "network error") {
+		return "network error"
+	}
+
+	// Extract first meaningful line, truncate if too long
+	firstLine := strings.Split(errStr, "\n")[0]
+	if len(firstLine) > 80 {
+		firstLine = firstLine[:77] + "..."
+	}
+
+	return strings.TrimSpace(firstLine)
 }

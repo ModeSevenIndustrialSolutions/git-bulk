@@ -7,17 +7,59 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
 // Constants to reduce code duplication
 const (
-	testRepo     = "https://github.com/octocat/Hello-World"
-	testTempErr  = "Failed to create temp dir: %v"
-	testUnexpErr = "Unexpected error: %v"
-	testTimeout  = "Test timed out"
+	testRepo       = "https://github.com/octocat/Hello-World"
+	testTempErr    = "Failed to create temp dir: %v"
+	testUnexpErr   = "Unexpected error: %v"
+	testTimeout    = "Test timed out"
+	testTempRemErr = "Failed to remove temp dir: %v"
 )
+
+// isRateLimitError checks if an error is due to API rate limiting
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "rate limit") ||
+		strings.Contains(errStr, "API rate limit exceeded")
+}
+
+// runTestWithTimeout runs a test function with a timeout and proper error handling
+func runTestWithTimeout(t *testing.T, testFunc func() error, expectError bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- testFunc()
+	}()
+
+	select {
+	case err := <-errChan:
+		if expectError {
+			if err == nil {
+				t.Error("Expected error but got none")
+			}
+		} else {
+			if err != nil {
+				if isRateLimitError(err) {
+					t.Skipf("Skipping test due to API rate limiting: %v", err)
+					return
+				}
+				t.Errorf(testUnexpErr, err)
+			}
+		}
+	case <-ctx.Done():
+		t.Error(testTimeout)
+	}
+}
 
 func TestRunClone(t *testing.T) {
 	tests := []struct {
@@ -49,44 +91,21 @@ func TestRunClone(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Set a timeout for the test
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			// Create a temporary directory for output
 			tmpDir, err := os.MkdirTemp("", "git-bulk-test")
 			if err != nil {
 				t.Fatalf(testTempErr, err)
 			}
 			defer func() {
 				if err := os.RemoveAll(tmpDir); err != nil {
-					t.Logf("Failed to remove temp dir: %v", err)
+					t.Logf(testTempRemErr, err)
 				}
 			}()
 
 			tt.cfg.OutputDir = tmpDir
 
-			// Run the clone function in a goroutine
-			errChan := make(chan error, 1)
-			go func() {
-				errChan <- runClone(tt.cfg, tt.source)
-			}()
-
-			// Wait for completion or timeout
-			select {
-			case err := <-errChan:
-				if tt.expectedError {
-					if err == nil {
-						t.Error("Expected error but got none")
-					}
-				} else {
-					if err != nil {
-						t.Errorf(testUnexpErr, err)
-					}
-				}
-			case <-ctx.Done():
-				t.Error(testTimeout)
-			}
+			runTestWithTimeout(t, func() error {
+				return runClone(tt.cfg, tt.source)
+			}, tt.expectedError)
 		})
 	}
 }
@@ -152,7 +171,7 @@ func TestConfigDefaults(t *testing.T) {
 	}
 	defer func() {
 		if err := os.RemoveAll(tmpDir); err != nil {
-			t.Logf("Failed to remove temp dir: %v", err)
+			t.Logf(testTempRemErr, err)
 		}
 	}()
 
@@ -175,7 +194,7 @@ func BenchmarkRunClone(b *testing.B) {
 	}
 	defer func() {
 		if err := os.RemoveAll(tempDir); err != nil {
-			b.Logf("Failed to remove temp dir: %v", err)
+			b.Logf(testTempRemErr, err)
 		}
 	}()
 

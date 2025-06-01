@@ -261,23 +261,88 @@ func (g *GerritProvider) ListRepositories(ctx context.Context, orgName string) (
 		return nil, err
 	}
 
-	// List all projects
-	resp, err := g.makeRequest(ctx, "GET", "projects/?d", nil) // d=description
+	projects, err := g.getProjects(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			// Log error but don't return it since this is in defer
-			_ = err // Explicitly ignore error to satisfy revive
-		}
-	}()
 
-	var projects map[string]GerritProject
-	if err := g.parseResponse(resp, &projects); err != nil {
-		return nil, err
+	return g.filterAndConvertProjects(projects, orgName), nil
+}
+
+// getProjects attempts to get projects from Gerrit using different API endpoints
+func (g *GerritProvider) getProjects(ctx context.Context) (map[string]GerritProject, error) {
+	// Try authenticated endpoints first
+	projects, err := g.tryAuthenticatedEndpoints(ctx)
+	if err == nil {
+		return projects, nil
 	}
 
+	// Only fall back to unauthenticated endpoints if we get specific errors
+	// that suggest authentication/authorization issues
+	if g.shouldTryUnauthenticated(err) {
+		return g.tryUnauthenticatedEndpoints(ctx)
+	}
+
+	return nil, err
+}
+
+// shouldTryUnauthenticated determines if we should try unauthenticated endpoints
+// based on the error from authenticated endpoints
+func (g *GerritProvider) shouldTryUnauthenticated(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+	// Try unauthenticated if we get HTML responses, auth errors, or 401/403 status codes
+	return strings.Contains(errStr, "received HTML response") ||
+		strings.Contains(errStr, "authentication") ||
+		strings.Contains(errStr, "unauthorized") ||
+		strings.Contains(errStr, "forbidden")
+}
+
+// tryAuthenticatedEndpoints tries authenticated API endpoints
+func (g *GerritProvider) tryAuthenticatedEndpoints(ctx context.Context) (map[string]GerritProject, error) {
+	endpoints := []string{"projects/?d", "projects/"}
+	return g.tryEndpointsWithMode(ctx, endpoints, g.makeRequest, true)
+}
+
+// tryUnauthenticatedEndpoints tries unauthenticated API endpoints
+func (g *GerritProvider) tryUnauthenticatedEndpoints(ctx context.Context) (map[string]GerritProject, error) {
+	endpoints := []string{"projects/?d", "projects/"}
+	return g.tryEndpointsWithMode(ctx, endpoints, g.makeUnauthenticatedRequest, false)
+}
+
+// tryEndpointsWithMode tries a list of endpoints using the provided request function and parsing mode
+func (g *GerritProvider) tryEndpointsWithMode(ctx context.Context, endpoints []string, requestFunc func(context.Context, string, string, io.Reader) (*http.Response, error), strict bool) (map[string]GerritProject, error) {
+	var lastErr error
+
+	for _, endpoint := range endpoints {
+		resp, err := requestFunc(ctx, "GET", endpoint, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		var projects map[string]GerritProject
+		err = g.parseResponseWithMode(resp, &projects, strict)
+		if err := resp.Body.Close(); err != nil {
+			_ = err // Explicitly ignore error to satisfy revive
+		}
+
+		if err != nil {
+			lastErr = fmt.Errorf("failed to parse response from %s: %w", endpoint, err)
+			continue
+		}
+
+		return projects, nil
+	}
+
+	return nil, fmt.Errorf("all endpoints failed, last error: %w", lastErr)
+}
+
+// filterAndConvertProjects filters projects by organization and converts them to Repository objects
+func (g *GerritProvider) filterAndConvertProjects(projects map[string]GerritProject, orgName string) []*Repository {
 	var repositories []*Repository
 	for projectName, project := range projects {
 		// Filter by organization/prefix if specified
@@ -288,8 +353,7 @@ func (g *GerritProvider) ListRepositories(ctx context.Context, orgName string) (
 		repo := g.convertProject(projectName, &project)
 		repositories = append(repositories, repo)
 	}
-
-	return repositories, nil
+	return repositories
 }
 
 func (g *GerritProvider) convertProject(projectName string, project *GerritProject) *Repository {
@@ -411,8 +475,51 @@ func (g *GerritProvider) makeRequest(ctx context.Context, method, endpoint strin
 	}
 
 	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", contentTypeJSON)
+	req.Header.Set("Accept", acceptJSON)
+
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for rate limiting
+	if resp.StatusCode == http.StatusTooManyRequests {
+		if err := resp.Body.Close(); err != nil {
+			// Log error but continue with rate limit handling
+			_ = err // Explicitly ignore error to satisfy revive
+		}
+		retryAfter := resp.Header.Get("Retry-After")
+		if retryAfter != "" {
+			if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
+				return nil, &RateLimitError{
+					RetryAfter: time.Duration(seconds) * time.Second,
+					Message:    fmt.Sprintf("Gerrit rate limit exceeded. Retry after: %v seconds", seconds),
+				}
+			}
+		}
+		return nil, &RateLimitError{
+			RetryAfter: time.Minute,
+			Message:    "Gerrit rate limit exceeded. Using default retry delay",
+		}
+	}
+
+	return resp, nil
+}
+
+// makeUnauthenticatedRequest makes an HTTP request to the Gerrit API without authentication
+func (g *GerritProvider) makeUnauthenticatedRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Response, error) {
+	// Try public API endpoint (without /a/ prefix)
+	url := g.baseURL + endpoint
+
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set headers but no authentication
+	req.Header.Set("Content-Type", contentTypeJSON)
+	req.Header.Set("Accept", acceptJSON)
 
 	resp, err := g.client.Do(req)
 	if err != nil {
@@ -445,18 +552,36 @@ func (g *GerritProvider) makeRequest(ctx context.Context, method, endpoint strin
 
 // parseResponse parses a Gerrit API response, handling the )]}' prefix
 func (g *GerritProvider) parseResponse(resp *http.Response, target interface{}) error {
+	return g.parseResponseWithMode(resp, target, true) // Default to strict mode
+}
+
+// parseResponseWithMode parses a Gerrit API response with configurable strictness
+func (g *GerritProvider) parseResponseWithMode(resp *http.Response, target interface{}, strict bool) error {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
 
-	// Gerrit responses start with )]}' to prevent CSRF attacks
 	bodyStr := string(body)
 
-	if !strings.HasPrefix(bodyStr, ")]}'\n") {
+	// Check if this looks like an HTML error page (more comprehensive check)
+	trimmedBody := strings.TrimSpace(bodyStr)
+	if strings.HasPrefix(trimmedBody, "<!DOCTYPE") ||
+		strings.HasPrefix(trimmedBody, "<html") ||
+		strings.HasPrefix(trimmedBody, "<HTML") {
+		return fmt.Errorf("received HTML response instead of JSON - this may indicate authentication is required or the Gerrit API is not accessible at this endpoint")
+	}
+
+	// Modern Gerrit responses start with )]}' to prevent CSRF attacks
+	if strings.HasPrefix(bodyStr, ")]}'\n") {
+		bodyStr = bodyStr[5:]
+	} else if strings.HasPrefix(bodyStr, ")]}'") {
+		bodyStr = bodyStr[4:]
+	} else if strict {
+		// In strict mode (authenticated requests), require the security prefix
 		return fmt.Errorf("invalid Gerrit response: missing security prefix")
 	}
-	bodyStr = bodyStr[5:]
+	// In non-strict mode (unauthenticated requests), try to parse as-is
 
 	return json.Unmarshal([]byte(bodyStr), target)
 }
@@ -537,3 +662,9 @@ func (g *GerritProvider) TestSSHConnection() error {
 func (g *GerritProvider) SupportsSSH() bool {
 	return g.enableSSH && g.sshAuth != nil
 }
+
+const (
+	// HTTP content type constants
+	contentTypeJSON = "application/json"
+	acceptJSON      = "application/json"
+)

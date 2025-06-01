@@ -295,10 +295,14 @@ func (m *Manager) CloneRepositories(ctx context.Context, repos []*provider.Repos
 			results = append(results, result)
 		} else {
 			// Create a result for repositories that didn't get processed
+			// Provide more helpful context about why processing failed
+			stats := m.pool.GetStats()
+			errorMsg := fmt.Errorf("repository was not processed - possible causes: worker pool full (%d active), context timeout, or job submission failed", stats.ActiveJobs)
+
 			results = append(results, &Result{
 				Repository: repo,
 				LocalPath:  m.getLocalPath(repo),
-				Error:      fmt.Errorf("repository was not processed"),
+				Error:      errorMsg,
 				Duration:   0,
 				JobID:      "",
 			})
@@ -420,19 +424,42 @@ func (m *Manager) getCloneURL(repo *provider.Repository) string {
 func (m *Manager) getLocalPath(repo *provider.Repository) string {
 	// Preserve hierarchy for nested repositories (e.g., Gerrit)
 	var relativePath string
+
+	// For nested repositories, use the full path but validate it
 	if repo.Path != "" && strings.Contains(repo.Path, "/") {
-		// Use the full path for nested repositories
+		// Sanitize the path to prevent directory traversal attacks
+		cleanPath := filepath.Clean(repo.Path)
+		if strings.HasPrefix(cleanPath, "..") || strings.HasPrefix(cleanPath, "/") {
+			m.logf("Warning: suspicious path detected for %s: %s, using repository name instead", repo.FullName, repo.Path)
+			relativePath = repo.Name
+		} else {
+			relativePath = cleanPath
+		}
+	} else if repo.Path != "" {
+		// Use the provided path as-is if it doesn't contain hierarchical separators
 		relativePath = repo.Path
+	} else if strings.Contains(repo.FullName, "/") && strings.Count(repo.FullName, "/") > 1 {
+		// Handle deeply nested hierarchical FullName (e.g., "myorg/team1/repo1")
+		// Only use hierarchical structure for deeply nested projects (more than 1 level)
+		// This is common for Gerrit nested projects
+		relativePath = repo.FullName
 	} else {
-		// Use organization/repository structure
-		if m.sourceInfo.Organization != "" {
+		// Use organization/repository structure for simple cases
+		if m.sourceInfo != nil && m.sourceInfo.Organization != "" {
 			relativePath = filepath.Join(m.sourceInfo.Organization, repo.Name)
 		} else {
 			relativePath = repo.Name
 		}
 	}
 
-	return filepath.Join(m.config.OutputDir, relativePath)
+	localPath := filepath.Join(m.config.OutputDir, relativePath)
+
+	// Log the path mapping in verbose mode for debugging nested project issues
+	if m.config.Verbose && (repo.Path != "" || strings.Contains(repo.FullName, "/")) {
+		m.logf("Path mapping for %s: repo.Path='%s' FullName='%s' -> localPath='%s'", repo.FullName, repo.Path, repo.FullName, localPath)
+	}
+
+	return localPath
 }
 
 func (m *Manager) repositoryExists(localPath string) bool {
@@ -539,6 +566,12 @@ func (m *Manager) performClone(ctx context.Context, cloneURL, localPath string) 
 			}
 		}
 
+		// Extract exit status for better error reporting
+		exitStatus := extractExitStatus(err)
+		if exitStatus != "" {
+			return fmt.Errorf("git clone failed, exit status %s\nOutput: %s", exitStatus, outputStr)
+		}
+
 		return fmt.Errorf("git clone failed: %w\nOutput: %s", err, outputStr)
 	}
 
@@ -596,91 +629,76 @@ func (m *Manager) createOutputDir() error {
 
 func (m *Manager) resultCollector() {
 	for result := range m.results {
+		// Record result
 		m.mu.Lock()
 		m.cloneResults[result.Repository.ID] = result
 		m.mu.Unlock()
-	}
-}
 
-func (m *Manager) recordResult(result *Result) {
-	select {
-	case m.results <- result:
-	default:
-		// Channel full, record directly
-		m.mu.Lock()
-		m.cloneResults[result.Repository.ID] = result
-		m.mu.Unlock()
-	}
-}
-
-func (m *Manager) getCloneResult(repoID string) *Result {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.cloneResults[repoID]
-}
-
-func (m *Manager) waitForCompletion(ctx context.Context) {
-	ticker := time.NewTicker(time.Second * 5)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			m.logf("Context cancelled, stopping clone operations")
-			return
-		case <-ticker.C:
-			stats := m.pool.GetStats()
-			if stats.ActiveJobs == 0 && stats.TotalJobs > 0 {
-				m.logf("All clone jobs completed")
-				return
+		// Print real-time result with immediate feedback
+		if result.Error != nil {
+			errorMsg := m.formatErrorMessage(result.Error)
+			fmt.Printf("❌ %s [%s]\n", result.Repository.FullName, errorMsg)
+		} else {
+			status := "✅"
+			switch result.Status {
+			case StatusSkipped:
+				status = "⏭️"
+			case StatusExists:
+				status = "📁"
 			}
-			m.logf("Clone progress: %d total, %d completed, %d failed, %d active",
-				stats.TotalJobs, stats.CompletedJobs, stats.FailedJobs, stats.ActiveJobs)
+			fmt.Printf("%s %s\n", status, result.Repository.FullName)
 		}
 	}
 }
 
-func (m *Manager) printSummary() {
-	stats := m.pool.GetStats()
+// formatErrorMessage formats an error message for concise display
+func (m *Manager) formatErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
 
-	m.logf("\n=== Clone Operation Summary ===")
-	m.logf("Total repositories: %d", stats.TotalJobs)
-	m.logf("Successfully cloned: %d", stats.CompletedJobs)
-	m.logf("Failed to clone: %d", stats.FailedJobs)
-	m.logf("Retry attempts: %d", stats.RetryJobs)
+	errStr := err.Error()
 
-	// List failed repositories
-	if stats.FailedJobs > 0 {
-		m.logf("\nFailed repositories:")
-		m.mu.RLock()
-		for _, result := range m.cloneResults {
-			if result.Error != nil {
-				m.logf("  - %s: %v", result.Repository.FullName, result.Error)
+	// Handle common error patterns
+	if strings.Contains(errStr, "repository was not processed") {
+		return "not processed - check worker queue and concurrency settings"
+	}
+
+	if strings.Contains(errStr, "exists and is not empty") {
+		return "failed, destination path exists and is not empty"
+	}
+
+	if strings.Contains(errStr, "authentication failed") {
+		return "authentication failed"
+	}
+
+	if strings.Contains(errStr, "repository not found") {
+		return "repository not found"
+	}
+
+	if strings.Contains(errStr, "network error") {
+		return "network error"
+	}
+
+	// Extract git clone exit status for cleaner output
+	if strings.Contains(errStr, "git clone failed") && strings.Contains(errStr, "exit status") {
+		// Extract the main error without verbose git output
+		lines := strings.Split(errStr, "\n")
+		if len(lines) > 0 {
+			firstLine := lines[0]
+			if strings.Contains(firstLine, "exit status") {
+				return "git clone failed, " + firstLine[strings.Index(firstLine, "exit status"):]
 			}
 		}
-		m.mu.RUnlock()
-	}
-}
-
-// GetResults returns all clone results
-func (m *Manager) GetResults() map[string]*Result {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	// Create a copy to avoid data races
-	results := make(map[string]*Result)
-	for k, v := range m.cloneResults {
-		results[k] = v
 	}
 
-	return results
-}
+	// Extract first meaningful line, truncate if too long
+	firstLine := strings.Split(errStr, "\n")[0]
+	if len(firstLine) > 80 {
+		firstLine = firstLine[:77] + "..."
+	}
 
-// Close stops the clone manager and cleans up resources
-func (m *Manager) Close() error {
-	close(m.results)
-	m.pool.Stop()
-	return nil
+	return strings.TrimSpace(firstLine)
 }
 
 func (m *Manager) logf(format string, args ...interface{}) {
@@ -739,4 +757,116 @@ func (s *OperationStats) LogSummary() {
 	if s.Failed > 0 {
 		log.Printf("Errors: %v", s.Errors)
 	}
+}
+
+// extractExitStatus extracts exit status from exec.Error for better error reporting
+func extractExitStatus(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	// Try to extract exit status from different error types
+	errStr := err.Error()
+	if strings.Contains(errStr, "exit status") {
+		// Look for pattern "exit status X"
+		parts := strings.Split(errStr, "exit status ")
+		if len(parts) > 1 {
+			// Extract just the numeric part
+			statusPart := strings.Fields(parts[1])
+			if len(statusPart) > 0 {
+				return statusPart[0]
+			}
+		}
+	}
+
+	return ""
+}
+
+func (m *Manager) recordResult(result *Result) {
+	select {
+	case m.results <- result:
+	default:
+		// Channel full, record directly
+		m.mu.Lock()
+		m.cloneResults[result.Repository.ID] = result
+		m.mu.Unlock()
+	}
+}
+
+func (m *Manager) getCloneResult(repoID string) *Result {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cloneResults[repoID]
+}
+
+func (m *Manager) waitForCompletion(ctx context.Context) {
+	ticker := time.NewTicker(time.Second * 2)
+	defer ticker.Stop()
+
+	lastProgress := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("\n⚠️  Operation cancelled by timeout")
+			return
+		case <-ticker.C:
+			stats := m.pool.GetStats()
+
+			// Check if all jobs are complete
+			if stats.ActiveJobs == 0 && stats.TotalJobs > 0 &&
+				(stats.CompletedJobs+stats.FailedJobs) >= stats.TotalJobs {
+				fmt.Printf("\n🎉 All %d jobs completed\n", stats.TotalJobs)
+				return
+			}
+
+			// Show periodic progress updates (every 10 seconds)
+			if time.Since(lastProgress) >= 10*time.Second {
+				if stats.TotalJobs > 0 {
+					completed := stats.CompletedJobs + stats.FailedJobs
+					percentage := float64(completed) / float64(stats.TotalJobs) * 100
+					fmt.Printf("📊 Progress: %.1f%% (%d/%d completed, %d active, %d failed)\n",
+						percentage, completed, stats.TotalJobs, stats.ActiveJobs, stats.FailedJobs)
+				}
+				lastProgress = time.Now()
+			}
+		}
+	}
+}
+
+func (m *Manager) printSummary() {
+	stats := m.pool.GetStats()
+
+	fmt.Printf("\n=== Clone Operation Summary ===\n")
+	fmt.Printf("Total repositories: %d\n", stats.TotalJobs)
+	fmt.Printf("Successfully cloned: %d\n", stats.CompletedJobs)
+	fmt.Printf("Failed to clone: %d\n", stats.FailedJobs)
+	fmt.Printf("Retry attempts: %d\n", stats.RetryJobs)
+
+	// Show completion percentage
+	if stats.TotalJobs > 0 {
+		percentage := float64(stats.CompletedJobs) / float64(stats.TotalJobs) * 100
+		fmt.Printf("Success rate: %.1f%%\n", percentage)
+	}
+}
+
+// GetResults returns all clone results
+func (m *Manager) GetResults() map[string]*Result {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	results := make(map[string]*Result)
+	for k, v := range m.cloneResults {
+		results[k] = v
+	}
+	return results
+}
+
+// Close stops the clone manager and cleans up resources
+func (m *Manager) Close() error {
+	close(m.results)
+	if m.sshWrapper != nil {
+		return m.sshWrapper.Cleanup()
+	}
+	return nil
 }

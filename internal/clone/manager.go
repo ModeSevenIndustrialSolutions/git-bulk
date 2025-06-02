@@ -77,6 +77,9 @@ type Manager struct {
 	cloneResults map[string]*Result
 	stats        *OperationStats
 	sshWrapper   *sshauth.GitSSHWrapper
+	// Track submitted jobs to avoid deadlock
+	submittedJobs   int
+	submittedJobsMu sync.Mutex
 }
 
 // OperationStats tracks clone operation statistics
@@ -196,15 +199,17 @@ func (m *Manager) CloneAll(ctx context.Context) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Submit clone jobs
-	for _, repo := range repos {
-		if err := m.submitCloneJob(ctx, repo); err != nil {
-			m.logf("Failed to submit clone job for %s: %v", repo.Name, err)
-			if !m.config.ContinueOnFail {
-				return err
-			}
-		}
+	// Submit clone jobs with batching to handle large repository counts
+	submittedCount := 0
+	if err := m.submitJobsInBatches(ctx, repos, &submittedCount); err != nil {
+		return err
 	}
+
+	m.submittedJobsMu.Lock()
+	m.submittedJobs = submittedCount
+	m.submittedJobsMu.Unlock()
+
+	m.logf("Successfully submitted %d out of %d jobs", submittedCount, len(repos))
 
 	// Wait for all jobs to complete
 	m.waitForCompletion(ctx)
@@ -235,6 +240,10 @@ func (m *Manager) CloneRepository(ctx context.Context, repo *provider.Repository
 	if err := m.submitCloneJob(ctx, repo); err != nil {
 		return fmt.Errorf("failed to submit clone job: %w", err)
 	}
+
+	m.submittedJobsMu.Lock()
+	m.submittedJobs = 1
+	m.submittedJobsMu.Unlock()
 
 	// Wait for completion
 	m.waitForCompletion(ctx)
@@ -280,15 +289,17 @@ func (m *Manager) CloneRepositories(ctx context.Context, repos []*provider.Repos
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Submit clone jobs
-	for _, repo := range repos {
-		if err := m.submitCloneJob(ctx, repo); err != nil {
-			m.logf("Failed to submit clone job for %s: %v", repo.Name, err)
-			if !m.config.ContinueOnFail {
-				return nil, err
-			}
-		}
+	// Submit clone jobs with batching to handle large repository counts
+	submittedCount := 0
+	if err := m.submitJobsInBatches(ctx, repos, &submittedCount); err != nil {
+		return nil, err
 	}
+
+	m.submittedJobsMu.Lock()
+	m.submittedJobs = submittedCount
+	m.submittedJobsMu.Unlock()
+
+	m.logf("Successfully submitted %d out of %d jobs", submittedCount, len(repos))
 
 	// Wait for all jobs to complete
 	m.waitForCompletion(ctx)
@@ -853,10 +864,21 @@ func (m *Manager) waitForCompletion(ctx context.Context) {
 			stats := m.pool.GetStats()
 			currentCompleted := stats.CompletedJobs + stats.FailedJobs
 
-			// Check if all jobs are complete
-			if stats.ActiveJobs == 0 && stats.TotalJobs > 0 &&
-				currentCompleted >= stats.TotalJobs {
-				fmt.Printf("\n🎉 All %d jobs completed\n", stats.TotalJobs)
+			// Get the number of jobs that were actually submitted
+			m.submittedJobsMu.Lock()
+			expectedJobs := int64(m.submittedJobs)
+			m.submittedJobsMu.Unlock()
+
+			// Check if all submitted jobs are complete
+			if stats.ActiveJobs == 0 && expectedJobs > 0 &&
+				currentCompleted >= expectedJobs {
+				fmt.Printf("\n🎉 All %d submitted jobs completed\n", expectedJobs)
+				return
+			}
+
+			// Handle case where no jobs were submitted
+			if expectedJobs == 0 && stats.ActiveJobs == 0 {
+				fmt.Printf("\n⚠️  No jobs were successfully submitted\n")
 				return
 			}
 
@@ -873,46 +895,58 @@ func (m *Manager) waitForCompletion(ctx context.Context) {
 
 			// Show periodic progress updates (every 10 seconds)
 			if timeSinceLastProgress >= 10*time.Second {
-				if stats.TotalJobs > 0 {
-					percentage := float64(currentCompleted) / float64(stats.TotalJobs) * 100
+				if expectedJobs > 0 {
+					percentage := float64(currentCompleted) / float64(expectedJobs) * 100
 					fmt.Printf("📊 Progress: %.1f%% (%d/%d completed, %d active, %d failed)\n",
-						percentage, currentCompleted, stats.TotalJobs, stats.ActiveJobs, stats.FailedJobs)
+						percentage, currentCompleted, expectedJobs, stats.ActiveJobs, stats.FailedJobs)
 				}
 				lastProgress = now
 			}
 
 			// Deadlock detection and timeout handling
-			if progressStalled && stats.ActiveJobs > 0 {
-				if timeSinceLastProgress >= stuckDetectionThreshold {
-					fmt.Printf("\n⚠️  Warning: No progress for %.1f minutes with %d active jobs\n",
-						timeSinceLastProgress.Minutes(), stats.ActiveJobs)
+			if progressStalled {
+				if stats.ActiveJobs > 0 {
+					// Case 1: We have active jobs but no progress
+					if timeSinceLastProgress >= stuckDetectionThreshold {
+						fmt.Printf("\n⚠️  Warning: No progress for %.1f minutes with %d active jobs\n",
+							timeSinceLastProgress.Minutes(), stats.ActiveJobs)
 
-					// Check for stuck jobs and provide more details
-					stuckJobs := m.pool.GetStuckJobs(stuckDetectionThreshold)
-					if len(stuckJobs) > 0 {
-						fmt.Printf("🔍 Found %d stuck jobs:\n", len(stuckJobs))
-						for i, job := range stuckJobs {
-							if i < 5 { // Show first 5 stuck jobs
-								fmt.Printf("  - %s (running for %v)\n", job.ID, time.Since(job.CreatedAt))
+						// Check for stuck jobs and provide more details
+						stuckJobs := m.pool.GetStuckJobs(stuckDetectionThreshold)
+						if len(stuckJobs) > 0 {
+							fmt.Printf("🔍 Found %d stuck jobs:\n", len(stuckJobs))
+							for i, job := range stuckJobs {
+								if i < 5 { // Show first 5 stuck jobs
+									fmt.Printf("  - %s (running for %v)\n", job.ID, time.Since(job.CreatedAt))
+								}
+							}
+							if len(stuckJobs) > 5 {
+								fmt.Printf("  ... and %d more stuck jobs\n", len(stuckJobs)-5)
 							}
 						}
-						if len(stuckJobs) > 5 {
-							fmt.Printf("  ... and %d more stuck jobs\n", len(stuckJobs)-5)
+
+						if timeSinceLastProgress >= maxStuckTime {
+							fmt.Printf("❌ Deadlock detected: No progress for %.1f minutes. Forcing timeout.\n",
+								timeSinceLastProgress.Minutes())
+
+							// Force kill stuck jobs
+							killedCount := m.pool.ForceKillStuckJobs(maxStuckTime)
+							if killedCount > 0 {
+								fmt.Printf("🔪 Forcefully terminated %d stuck jobs\n", killedCount)
+							}
+
+							fmt.Printf("Active jobs may be stuck in long-running operations.\n")
+							fmt.Printf("Consider reducing timeout values or checking network connectivity.\n")
+							return
 						}
 					}
-
-					if timeSinceLastProgress >= maxStuckTime {
-						fmt.Printf("❌ Deadlock detected: No progress for %.1f minutes. Forcing timeout.\n",
-							timeSinceLastProgress.Minutes())
-
-						// Force kill stuck jobs
-						killedCount := m.pool.ForceKillStuckJobs(maxStuckTime)
-						if killedCount > 0 {
-							fmt.Printf("🔪 Forcefully terminated %d stuck jobs\n", killedCount)
-						}
-
-						fmt.Printf("Active jobs may be stuck in long-running operations.\n")
-						fmt.Printf("Consider reducing timeout values or checking network connectivity.\n")
+				} else if expectedJobs > 0 && currentCompleted < expectedJobs {
+					// Case 2: No active jobs but not all expected jobs completed - likely submission failures
+					if timeSinceLastProgress >= 30*time.Second { // Shorter timeout for this case
+						fmt.Printf("\n❌ Deadlock detected: %d/%d jobs completed but no active jobs\n",
+							currentCompleted, expectedJobs)
+						fmt.Printf("This suggests job submission failures or worker pool issues.\n")
+						fmt.Printf("Check logs for job submission errors.\n")
 						return
 					}
 				}
@@ -956,4 +990,137 @@ func (m *Manager) Close() error {
 		return m.sshWrapper.Cleanup()
 	}
 	return nil
+}
+
+// submitJobsInBatches submits jobs in batches to prevent queue overflow
+func (m *Manager) submitJobsInBatches(ctx context.Context, repos []*provider.Repository, submittedCount *int) error {
+	// Get queue size from worker config (default is 100)
+	queueSize := m.config.WorkerConfig.QueueSize
+
+	// Use 90% of queue size to be more aggressive
+	batchSize := int(float64(queueSize) * 0.9)
+	if batchSize < 20 {
+		batchSize = 20 // Minimum batch size
+	}
+
+	totalRepos := len(repos)
+	m.logf("Submitting %d repositories in batches of %d (queue size: %d)", totalRepos, batchSize, queueSize)
+
+	for batchStart := 0; batchStart < totalRepos; batchStart += batchSize {
+		// Handle potential context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Calculate batch end
+		batchEnd := batchStart + batchSize
+		if batchEnd > totalRepos {
+			batchEnd = totalRepos
+		}
+
+		currentBatch := repos[batchStart:batchEnd]
+		batchNum := (batchStart / batchSize) + 1
+		totalBatches := (totalRepos + batchSize - 1) / batchSize
+
+		m.logf("🚀 Starting batch %d/%d: processing repositories %d-%d",
+			batchNum, totalBatches, batchStart+1, batchEnd)
+
+		// Submit all jobs in this batch
+		batchSubmitted := 0
+		for _, repo := range currentBatch {
+			if err := m.submitCloneJobWithRetry(ctx, repo); err != nil {
+				m.logf("Failed to submit clone job for %s: %v", repo.Name, err)
+				if !m.config.ContinueOnFail {
+					return err
+				}
+			} else {
+				batchSubmitted++
+				*submittedCount++
+			}
+		}
+
+		m.logf("📤 Batch %d/%d: submitted %d/%d jobs, waiting for completion...",
+			batchNum, totalBatches, batchSubmitted, len(currentBatch))
+
+		// Wait for sufficient queue space before submitting next batch
+		// This prevents queue overflow and ensures steady progress
+		m.waitForQueueSpace(ctx, batchSize)
+
+		m.logf("✅ Batch %d/%d: ready for next batch (submitted %d/%d total)",
+			batchNum, totalBatches, *submittedCount, totalRepos)
+	}
+
+	m.logf("🎯 All batches submitted: %d/%d repositories processed", *submittedCount, totalRepos)
+	return nil
+}
+
+// submitCloneJobWithRetry submits a clone job with retry logic for queue full scenarios
+func (m *Manager) submitCloneJobWithRetry(ctx context.Context, repo *provider.Repository) error {
+	maxRetries := 10                    // Reduced retry count since we're using real batching
+	baseDelay := time.Millisecond * 100 // Slightly longer delay
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if err := m.submitCloneJob(ctx, repo); err != nil {
+			if err.Error() == "job queue is full" && attempt < maxRetries-1 {
+				// With true batching, this should rarely happen
+				m.logf("Queue full for %s, retrying... (attempt %d/%d)",
+					repo.Name, attempt+1, maxRetries)
+
+				// Simple linear backoff
+				delay := time.Duration(attempt+1) * baseDelay
+				if delay > time.Second {
+					delay = time.Second // Cap at 1 second
+				}
+
+				select {
+				case <-time.After(delay):
+					continue
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return err
+		}
+		// Successfully submitted
+		if attempt > 0 {
+			m.logf("Successfully submitted %s after %d attempts", repo.Name, attempt+1)
+		}
+		return nil
+	}
+
+	return fmt.Errorf("failed to submit job for %s after %d attempts - queue consistently full", repo.Name, maxRetries)
+}
+
+// waitForQueueSpace waits until there's sufficient queue space for the next batch
+func (m *Manager) waitForQueueSpace(ctx context.Context, requiredSpace int) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	queueSize := m.config.WorkerConfig.QueueSize
+	m.logf("🔍 Waiting for %d queue slots (queue size: %d)", requiredSpace, queueSize)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			stats := m.pool.GetStats()
+
+			// Estimate current queue usage: active jobs represent jobs in the queue
+			// In reality, active jobs are jobs being processed, but we can use this as an approximation
+			currentQueueUsage := int(stats.ActiveJobs)
+			availableSpace := queueSize - currentQueueUsage
+
+			if availableSpace >= requiredSpace {
+				m.logf("✅ Queue space available: %d/%d slots free, proceeding with next batch",
+					availableSpace, queueSize)
+				return
+			}
+
+			m.logf("⏳ Queue space check: %d/%d slots available, need %d (active: %d, completed: %d)",
+				availableSpace, queueSize, requiredSpace, stats.ActiveJobs, stats.CompletedJobs)
+		}
+	}
 }

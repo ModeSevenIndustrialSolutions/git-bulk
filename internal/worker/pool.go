@@ -310,6 +310,10 @@ func (p *Pool) processJob(job *Job, workerID int) {
 	case p.results <- job:
 	case <-p.ctx.Done():
 		return
+	default:
+		// If results channel is full or closed, log and continue
+		p.logf("Worker %d unable to send result for job %s - channel unavailable", workerID, job.ID)
+		return
 	}
 }
 
@@ -331,15 +335,31 @@ func (p *Pool) scheduleRetry(job *Job) {
 
 		select {
 		case <-timer.C:
+			// Check if pool is stopped before attempting retry
+			p.stopMutex.Lock()
+			stopped := p.stopped
+			p.stopMutex.Unlock()
+
+			if stopped {
+				p.logf("Job %s retry cancelled - pool is stopped", job.ID)
+				return
+			}
+
 			// Reset job status and resubmit
 			job.SetStatus(JobPending)
 			select {
 			case p.jobs <- job:
 				p.logf("Job %s resubmitted for retry", job.ID)
 			case <-p.ctx.Done():
+				p.logf("Job %s retry cancelled - context done", job.ID)
+				return
+			default:
+				// Channel is likely closed, log and give up
+				p.logf("Job %s retry failed - unable to resubmit", job.ID)
 				return
 			}
 		case <-p.ctx.Done():
+			p.logf("Job %s retry cancelled - context cancelled", job.ID)
 			return
 		}
 	}()

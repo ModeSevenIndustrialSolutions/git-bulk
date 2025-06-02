@@ -39,6 +39,7 @@ type Config struct {
 	DryRun          bool
 	Verbose         bool
 	MaxRepos        int
+	CloneArchived   bool // Whether to clone archived/read-only repositories
 	GitHubToken     string
 	GitLabToken     string
 	GerritUser      string
@@ -119,6 +120,7 @@ Examples:
 	cloneCmd.Flags().BoolVar(&cfg.UseSSH, "ssh", false, "Use SSH for cloning")
 	cloneCmd.Flags().BoolVar(&cfg.DryRun, "dry-run", false, "Show what would be done without actually doing it")
 	cloneCmd.Flags().IntVar(&cfg.MaxRepos, "max-repos", 0, "Maximum number of repositories to process (0 = unlimited)")
+	cloneCmd.Flags().BoolVar(&cfg.CloneArchived, "clone-archived", false, "Include archived/read-only repositories in cloning (by default they are skipped)")
 
 	// Authentication flags
 	cloneCmd.Flags().StringVar(&cfg.GitHubToken, "github-token", "", "GitHub personal access token (or set GITHUB_TOKEN)")
@@ -346,6 +348,7 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		ContinueOnFail: true,
 		CloneTimeout:   cfg.CloneTimeout,
 		NetworkTimeout: cfg.NetworkTimeout,
+		CloneArchived:  cfg.CloneArchived,
 	}
 
 	cloneManager := clone.NewManager(cloneConfig, prov, sourceInfo)

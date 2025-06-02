@@ -19,11 +19,11 @@ func TestManagerCloneRepositories(t *testing.T) {
 	// Create temporary directory for testing
 	tempDir, err := os.MkdirTemp("", "clone-test-*")
 	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+		t.Fatalf(errFailedCreateTempDir, err)
 	}
 	defer func() {
 		if err := os.RemoveAll(tempDir); err != nil {
-			t.Logf("Failed to remove temp dir: %v", err)
+			t.Logf(errFailedRemoveTempDir, err)
 		}
 	}()
 
@@ -31,16 +31,16 @@ func TestManagerCloneRepositories(t *testing.T) {
 	repos := []*provider.Repository{
 		{
 			Name:        "repo1",
-			FullName:    "org/repo1",
-			CloneURL:    "https://github.com/octocat/Hello-World.git", // Using real public repo for testing
-			SSHCloneURL: "git@github.com:octocat/Hello-World.git",
+			FullName:    testOrgRepo1,
+			CloneURL:    testRepoHTTPS, // Using real public repo for testing
+			SSHCloneURL: testRepoSSH,
 			Description: "Test repository 1",
 		},
 		{
 			Name:        "repo2",
-			FullName:    "org/repo2",
-			CloneURL:    "https://github.com/octocat/Hello-World.git", // Same repo for testing
-			SSHCloneURL: "git@github.com:octocat/Hello-World.git",
+			FullName:    testOrgRepo2,
+			CloneURL:    testRepoHTTPS, // Same repo for testing
+			SSHCloneURL: testRepoSSH,
 			Description: "Test repository 2",
 		},
 	}
@@ -541,5 +541,414 @@ func TestNewManager(t *testing.T) {
 
 	if manager.pool == nil {
 		t.Error("Manager should have a worker pool")
+	}
+}
+
+// Test constants to avoid duplication
+const (
+	testActiveRepo     = "active-repo"
+	testGitHubArchived = "github-archived"
+	testGitLabArchived = "gitlab-archived"
+	testGerritReadOnly = "gerrit-readonly"
+	testGerritHidden   = "gerrit-hidden"
+	testGitHubNotArch  = "github-not-archived"
+	testGerritActive   = "gerrit-active"
+
+	// Error messages
+	errFailedCreateTempDir = "Failed to create temp dir: %v"
+	errFailedRemoveTempDir = "Failed to remove temp dir: %v"
+	errCloneReposFailed    = "CloneRepositories failed: %v"
+	errExpectedResults     = "Expected %d results, got %d"
+
+	// Test URLs
+	testRepoHTTPS = "https://github.com/octocat/Hello-World.git"
+	testRepoSSH   = "git@github.com:octocat/Hello-World.git"
+	testOrgRepo1  = "org/repo1"
+	testOrgRepo2  = "org/repo2"
+
+	// URL patterns
+	githubURLPattern = "https://github.com/org/"
+	gitlabURLPattern = "https://gitlab.com/org/"
+	gerritURLPattern = "https://gerrit.example.com/org/"
+)
+
+// createTestArchiveRepos creates test repositories with different archive states
+func createTestArchiveRepos() []*provider.Repository {
+	return []*provider.Repository{
+		{
+			Name:     testActiveRepo,
+			FullName: "org/" + testActiveRepo,
+			CloneURL: githubURLPattern + testActiveRepo + ".git",
+			Metadata: map[string]string{},
+		},
+		{
+			Name:     testGitHubArchived,
+			FullName: "org/" + testGitHubArchived,
+			CloneURL: githubURLPattern + testGitHubArchived + ".git",
+			Metadata: map[string]string{"archived": "true"},
+		},
+		{
+			Name:     testGitLabArchived,
+			FullName: "org/" + testGitLabArchived,
+			CloneURL: gitlabURLPattern + testGitLabArchived + ".git",
+			Metadata: map[string]string{"archived": "true"},
+		},
+		{
+			Name:     testGerritReadOnly,
+			FullName: "org/" + testGerritReadOnly,
+			CloneURL: gerritURLPattern + testGerritReadOnly + ".git",
+			Metadata: map[string]string{"state": "READ_ONLY"},
+		},
+		{
+			Name:     testGerritHidden,
+			FullName: "org/" + testGerritHidden,
+			CloneURL: gerritURLPattern + testGerritHidden + ".git",
+			Metadata: map[string]string{"state": "HIDDEN"},
+		},
+		{
+			Name:     testGitHubNotArch,
+			FullName: "org/" + testGitHubNotArch,
+			CloneURL: githubURLPattern + testGitHubNotArch + ".git",
+			Metadata: map[string]string{"archived": "false"},
+		},
+		{
+			Name:     testGerritActive,
+			FullName: "org/" + testGerritActive,
+			CloneURL: gerritURLPattern + testGerritActive + ".git",
+			Metadata: map[string]string{"state": "ACTIVE"},
+		},
+	}
+}
+
+// TestManagerArchiveFiltering tests the archive filtering functionality
+func TestManagerArchiveFiltering(t *testing.T) {
+	repos := createTestArchiveRepos()
+
+	t.Run("SkipArchived", func(t *testing.T) {
+		testSkipArchivedRepos(t, repos)
+	})
+
+	t.Run("IncludeArchived", func(t *testing.T) {
+		testIncludeArchivedRepos(t, repos)
+	})
+}
+
+func testSkipArchivedRepos(t *testing.T, repos []*provider.Repository) {
+	manager := NewManager(&Config{
+		CloneArchived: false,
+		WorkerConfig: &worker.Config{
+			WorkerCount: 1,
+			MaxRetries:  1,
+			RetryDelay:  time.Second,
+			QueueSize:   10,
+		},
+	}, nil, nil)
+
+	filtered, skipped := manager.filterRepositories(repos)
+
+	// Should have 3 active repositories
+	expectedActive := 3
+	if len(filtered) != expectedActive {
+		t.Errorf("Expected %d active repositories, got %d", expectedActive, len(filtered))
+	}
+
+	// Should have 4 archived repositories
+	expectedArchived := 4
+	if len(skipped) != expectedArchived {
+		t.Errorf("Expected %d archived repositories, got %d", expectedArchived, len(skipped))
+	}
+
+	verifyActiveRepos(t, filtered)
+	verifyArchivedRepos(t, skipped)
+}
+
+func testIncludeArchivedRepos(t *testing.T, repos []*provider.Repository) {
+	manager := NewManager(&Config{
+		CloneArchived: true,
+		WorkerConfig: &worker.Config{
+			WorkerCount: 1,
+			MaxRetries:  1,
+			RetryDelay:  time.Second,
+			QueueSize:   10,
+		},
+	}, nil, nil)
+
+	filtered, skipped := manager.filterRepositories(repos)
+
+	// Should include all repositories
+	if len(filtered) != len(repos) {
+		t.Errorf("Expected all %d repositories to be included, got %d", len(repos), len(filtered))
+	}
+
+	// Should have no skipped repositories
+	if len(skipped) != 0 {
+		t.Errorf("Expected no skipped repositories, got %d", len(skipped))
+	}
+}
+
+func verifyActiveRepos(t *testing.T, filtered []*provider.Repository) {
+	activeNames := make(map[string]bool)
+	for _, repo := range filtered {
+		activeNames[repo.Name] = true
+	}
+
+	expectedActiveNames := []string{testActiveRepo, testGitHubNotArch, testGerritActive}
+	for _, name := range expectedActiveNames {
+		if !activeNames[name] {
+			t.Errorf("Expected active repository %s not found in filtered results", name)
+		}
+	}
+}
+
+func verifyArchivedRepos(t *testing.T, skipped []*provider.Repository) {
+	archivedNames := make(map[string]bool)
+	for _, repo := range skipped {
+		archivedNames[repo.Name] = true
+	}
+
+	expectedArchivedNames := []string{testGitHubArchived, testGitLabArchived, testGerritReadOnly, testGerritHidden}
+	for _, name := range expectedArchivedNames {
+		if !archivedNames[name] {
+			t.Errorf("Expected archived repository %s not found in skipped results", name)
+		}
+	}
+}
+
+// TestManagerIsRepositoryArchived tests the archive detection logic
+func TestManagerIsRepositoryArchived(t *testing.T) {
+	manager := NewManager(&Config{}, nil, nil)
+
+	testCases := []struct {
+		name     string
+		repo     *provider.Repository
+		expected bool
+	}{
+		{
+			name: "No metadata",
+			repo: &provider.Repository{
+				Name: "no-metadata",
+			},
+			expected: false,
+		},
+		{
+			name: "Empty metadata",
+			repo: &provider.Repository{
+				Name:     "empty-metadata",
+				Metadata: map[string]string{},
+			},
+			expected: false,
+		},
+		{
+			name: "GitHub archived true",
+			repo: &provider.Repository{
+				Name:     "github-archived",
+				Metadata: map[string]string{"archived": "true"},
+			},
+			expected: true,
+		},
+		{
+			name: "GitHub archived false",
+			repo: &provider.Repository{
+				Name:     "github-not-archived",
+				Metadata: map[string]string{"archived": "false"},
+			},
+			expected: false,
+		},
+		{
+			name: "GitLab archived true",
+			repo: &provider.Repository{
+				Name:     "gitlab-archived",
+				Metadata: map[string]string{"archived": "true"},
+			},
+			expected: true,
+		},
+		{
+			name: "Gerrit READ_ONLY",
+			repo: &provider.Repository{
+				Name:     "gerrit-readonly",
+				Metadata: map[string]string{"state": "READ_ONLY"},
+			},
+			expected: true,
+		},
+		{
+			name: "Gerrit HIDDEN",
+			repo: &provider.Repository{
+				Name:     "gerrit-hidden",
+				Metadata: map[string]string{"state": "HIDDEN"},
+			},
+			expected: true,
+		},
+		{
+			name: "Gerrit ACTIVE",
+			repo: &provider.Repository{
+				Name:     "gerrit-active",
+				Metadata: map[string]string{"state": "ACTIVE"},
+			},
+			expected: false,
+		},
+		{
+			name: "Mixed metadata with archived true",
+			repo: &provider.Repository{
+				Name: "mixed-archived",
+				Metadata: map[string]string{
+					"archived":    "true",
+					"description": "Test repository",
+					"state":       "ACTIVE",
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Mixed metadata with state READ_ONLY",
+			repo: &provider.Repository{
+				Name: "mixed-readonly",
+				Metadata: map[string]string{
+					"description": "Test repository",
+					"state":       "READ_ONLY",
+				},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := manager.isRepositoryArchived(tc.repo)
+			if result != tc.expected {
+				t.Errorf("Expected %v for repository %s, got %v", tc.expected, tc.repo.Name, result)
+			}
+		})
+	}
+}
+
+// TestManagerCloneRepositoriesWithArchiveFiltering tests full clone operation with archive filtering
+func TestManagerCloneRepositoriesWithArchiveFiltering(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "clone-archive-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(tempDir); err != nil {
+			t.Logf("Failed to remove temp dir: %v", err)
+		}
+	}()
+
+	repos := createTestCloneRepos()
+
+	t.Run("SkipArchived", func(t *testing.T) {
+		testCloneSkipArchived(t, repos, tempDir)
+	})
+
+	t.Run("IncludeArchived", func(t *testing.T) {
+		testCloneIncludeArchived(t, repos, tempDir)
+	})
+}
+
+func createTestCloneRepos() []*provider.Repository {
+	return []*provider.Repository{
+		{
+			Name:        testActiveRepo,
+			FullName:    "org/" + testActiveRepo,
+			CloneURL:    testRepoHTTPS, // Using real repo for testing
+			SSHCloneURL: testRepoSSH,
+			Metadata:    map[string]string{},
+		},
+		{
+			Name:        "archived-repo",
+			FullName:    "org/archived-repo",
+			CloneURL:    testRepoHTTPS,
+			SSHCloneURL: testRepoSSH,
+			Metadata:    map[string]string{"archived": "true"},
+		},
+	}
+}
+
+func testCloneSkipArchived(t *testing.T, repos []*provider.Repository, tempDir string) {
+	manager := NewManager(&Config{
+		CloneArchived: false,
+		WorkerConfig: &worker.Config{
+			WorkerCount: 1,
+			MaxRetries:  1,
+			RetryDelay:  time.Second,
+			QueueSize:   10,
+		},
+		CloneTimeout:   30 * time.Minute,
+		NetworkTimeout: 5 * time.Minute,
+	}, nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	results, err := manager.CloneRepositories(ctx, repos, tempDir, true, false) // dry run
+	if err != nil {
+		t.Fatalf("CloneRepositories failed: %v", err)
+	}
+
+	// Should get 2 results: 1 processed, 1 skipped
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results, got %d", len(results))
+	}
+
+	verifySkippedResults(t, results)
+}
+
+func testCloneIncludeArchived(t *testing.T, repos []*provider.Repository, tempDir string) {
+	manager := NewManager(&Config{
+		CloneArchived: true,
+		WorkerConfig: &worker.Config{
+			WorkerCount: 1,
+			MaxRetries:  1,
+			RetryDelay:  time.Second,
+			QueueSize:   10,
+		},
+		CloneTimeout:   30 * time.Minute,
+		NetworkTimeout: 5 * time.Minute,
+	}, nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	results, err := manager.CloneRepositories(ctx, repos, tempDir, true, false) // dry run
+	if err != nil {
+		t.Fatalf("CloneRepositories failed: %v", err)
+	}
+
+	// Should get 2 results: both processed
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results, got %d", len(results))
+	}
+
+	// Both repositories should be processed (not skipped)
+	for _, result := range results {
+		if result.Status == StatusSkipped {
+			t.Errorf("Repository %s should not be skipped when CloneArchived is true", result.Repository.Name)
+		}
+	}
+}
+
+func verifySkippedResults(t *testing.T, results []*Result) {
+	// Find results by repository name
+	var activeResult, archivedResult *Result
+	for _, result := range results {
+		switch result.Repository.Name {
+		case testActiveRepo:
+			activeResult = result
+		case "archived-repo":
+			archivedResult = result
+		}
+	}
+
+	// Active repository should be processed
+	if activeResult == nil {
+		t.Error("Active repository result not found")
+	} else if activeResult.Status == StatusSkipped {
+		t.Error("Active repository should not be skipped")
+	}
+
+	// Archived repository should be skipped
+	if archivedResult == nil {
+		t.Error("Archived repository result not found")
+	} else if archivedResult.Status != StatusSkipped {
+		t.Errorf("Archived repository should be skipped, got status: %v", archivedResult.Status)
 	}
 }

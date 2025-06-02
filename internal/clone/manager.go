@@ -36,6 +36,7 @@ type Config struct {
 	SkipExisting     bool // Skip existing repositories instead of failing
 	ValidateClone    bool // Validate that clone was successful
 	CleanupOnFailure bool // Remove failed clone directories
+	CloneArchived    bool // Whether to clone archived/read-only repositories
 	MaxConcurrentOps int  // Maximum concurrent clone operations per worker
 	// Timeout configuration
 	CloneTimeout   time.Duration // Individual git clone operation timeout
@@ -59,6 +60,7 @@ func DefaultConfig() *Config {
 		SkipExisting:     true,
 		ValidateClone:    true,
 		CleanupOnFailure: true,
+		CloneArchived:    false, // Skip archived repositories by default
 		MaxConcurrentOps: 2,
 		CloneTimeout:     30 * time.Minute, // 30 minute timeout per clone
 		NetworkTimeout:   5 * time.Minute,  // 5 minute network timeout
@@ -199,9 +201,16 @@ func (m *Manager) CloneAll(ctx context.Context) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
+	// Filter repositories based on archive status
+	filteredRepos, skippedRepos := m.filterRepositories(repos)
+
+	if len(skippedRepos) > 0 {
+		m.logf("Filtered out %d archived repositories, processing %d repositories", len(skippedRepos), len(filteredRepos))
+	}
+
 	// Submit clone jobs with batching to handle large repository counts
 	submittedCount := 0
-	if err := m.submitJobsInBatches(ctx, repos, &submittedCount); err != nil {
+	if err := m.submitJobsInBatches(ctx, filteredRepos, &submittedCount); err != nil {
 		return err
 	}
 
@@ -289,9 +298,16 @@ func (m *Manager) CloneRepositories(ctx context.Context, repos []*provider.Repos
 		return nil, fmt.Errorf("failed to create output directory: %w", err)
 	}
 
+	// Filter repositories based on archive status
+	filteredRepos, skippedRepos := m.filterRepositories(repos)
+
+	if len(skippedRepos) > 0 {
+		m.logf("Filtered out %d archived repositories, processing %d repositories", len(skippedRepos), len(filteredRepos))
+	}
+
 	// Submit clone jobs with batching to handle large repository counts
 	submittedCount := 0
-	if err := m.submitJobsInBatches(ctx, repos, &submittedCount); err != nil {
+	if err := m.submitJobsInBatches(ctx, filteredRepos, &submittedCount); err != nil {
 		return nil, err
 	}
 
@@ -306,7 +322,21 @@ func (m *Manager) CloneRepositories(ctx context.Context, repos []*provider.Repos
 
 	// Collect results
 	var results []*Result
-	for _, repo := range repos {
+
+	// Add results for skipped archived repositories
+	for _, repo := range skippedRepos {
+		results = append(results, &Result{
+			Repository: repo,
+			LocalPath:  m.getLocalPath(repo),
+			Error:      nil,
+			Duration:   0,
+			JobID:      "",
+			Status:     StatusSkipped,
+		})
+	}
+
+	// Add results for processed repositories
+	for _, repo := range filteredRepos {
 		if result := m.getCloneResult(repo.ID); result != nil {
 			results = append(results, result)
 		} else {
@@ -376,6 +406,16 @@ func (m *Manager) createCloneTask(repo *provider.Repository) func(ctx context.Co
 			}
 			result.Status = StatusExists
 			return nil
+		}
+
+		// Validate and cleanup directory if it exists but is not a valid git repository
+		if err := m.validateAndCleanupDirectory(localPath); err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				result.Status = StatusExists
+				return nil
+			}
+			result.Error = fmt.Errorf("directory validation failed: %w", err)
+			return result.Error
 		}
 
 		// Perform dry run check
@@ -490,15 +530,54 @@ func (m *Manager) repositoryExists(localPath string) bool {
 		return true
 	}
 
-	// Check if directory exists and has files (potential incomplete clone)
-	if stat, err := os.Stat(localPath); err == nil && stat.IsDir() {
-		if entries, err := os.ReadDir(localPath); err == nil && len(entries) > 0 {
-			m.logf("Directory %s exists but is not a valid git repository", localPath)
-			return m.config.SkipExisting // Return based on configuration
-		}
+	return false
+}
+
+// validateAndCleanupDirectory validates if a directory is a proper git repository
+// and optionally cleans it up if it's invalid
+func (m *Manager) validateAndCleanupDirectory(localPath string) error {
+	// Check if directory exists
+	stat, err := os.Stat(localPath)
+	if os.IsNotExist(err) {
+		return nil // Directory doesn't exist, nothing to validate
+	}
+	if err != nil {
+		return fmt.Errorf("failed to check directory %s: %w", localPath, err)
 	}
 
-	return false
+	if !stat.IsDir() {
+		return fmt.Errorf("path %s exists but is not a directory", localPath)
+	}
+
+	// Check if it's already a valid git repository
+	if m.repositoryExists(localPath) {
+		if m.config.SkipExisting {
+			return fmt.Errorf("repository already exists at %s", localPath)
+		}
+		// If not skipping existing, we might want to update/fetch
+		return nil
+	}
+
+	// Directory exists but is not a valid git repository
+	// Check if it has any contents
+	entries, err := os.ReadDir(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to read directory %s: %w", localPath, err)
+	}
+
+	if len(entries) > 0 {
+		m.logf("⚠️  Directory %s exists but is not a valid git repository (contains %d items)", localPath, len(entries))
+
+		// For now, always clean up invalid directories to allow retry
+		// In the future, this could be configurable
+		m.logf("🧹 Cleaning up invalid directory %s to allow fresh clone", localPath)
+		if err := os.RemoveAll(localPath); err != nil {
+			return fmt.Errorf("failed to cleanup invalid directory %s: %w", localPath, err)
+		}
+		m.logf("✅ Successfully cleaned up %s", localPath)
+	}
+
+	return nil
 }
 
 // performClone performs the actual git clone operation with enhanced error handling and timeouts
@@ -1123,4 +1202,52 @@ func (m *Manager) waitForQueueSpace(ctx context.Context, requiredSpace int) {
 				availableSpace, queueSize, requiredSpace, stats.ActiveJobs, stats.CompletedJobs)
 		}
 	}
+}
+
+// isRepositoryArchived checks if a repository is archived based on its metadata
+func (m *Manager) isRepositoryArchived(repo *provider.Repository) bool {
+	if repo.Metadata == nil {
+		return false
+	}
+
+	// Check for GitHub/GitLab style archived field
+	if archived, exists := repo.Metadata["archived"]; exists {
+		return archived == "true"
+	}
+
+	// Check for Gerrit style state field
+	if state, exists := repo.Metadata["state"]; exists {
+		// Gerrit uses "READ_ONLY" for archived projects
+		return state == "READ_ONLY" || state == "HIDDEN"
+	}
+
+	return false
+}
+
+// filterRepositories filters repositories based on configuration
+func (m *Manager) filterRepositories(repos []*provider.Repository) ([]*provider.Repository, []*provider.Repository) {
+	if m.config.CloneArchived {
+		// Include all repositories when CloneArchived is true
+		return repos, nil
+	}
+
+	var filtered []*provider.Repository
+	var skipped []*provider.Repository
+
+	for _, repo := range repos {
+		if m.isRepositoryArchived(repo) {
+			skipped = append(skipped, repo)
+			if m.config.Verbose {
+				m.logf("Skipping archived repository: %s", repo.FullName)
+			}
+		} else {
+			filtered = append(filtered, repo)
+		}
+	}
+
+	if len(skipped) > 0 {
+		m.logf("Skipped %d archived repositories (use --clone-archived to include them)", len(skipped))
+	}
+
+	return filtered, skipped
 }

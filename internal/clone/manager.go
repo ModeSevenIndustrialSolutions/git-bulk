@@ -37,6 +37,9 @@ type Config struct {
 	ValidateClone    bool // Validate that clone was successful
 	CleanupOnFailure bool // Remove failed clone directories
 	MaxConcurrentOps int  // Maximum concurrent clone operations per worker
+	// Timeout configuration
+	CloneTimeout   time.Duration // Individual git clone operation timeout
+	NetworkTimeout time.Duration // Network operation timeout for git commands
 	// SSH configuration
 	SSHConfig *sshauth.Config
 }
@@ -57,6 +60,8 @@ func DefaultConfig() *Config {
 		ValidateClone:    true,
 		CleanupOnFailure: true,
 		MaxConcurrentOps: 2,
+		CloneTimeout:     30 * time.Minute, // 30 minute timeout per clone
+		NetworkTimeout:   5 * time.Minute,  // 5 minute network timeout
 		SSHConfig:        sshauth.DefaultConfig(),
 	}
 }
@@ -485,8 +490,12 @@ func (m *Manager) repositoryExists(localPath string) bool {
 	return false
 }
 
-// performClone performs the actual git clone operation with enhanced error handling
+// performClone performs the actual git clone operation with enhanced error handling and timeouts
 func (m *Manager) performClone(ctx context.Context, cloneURL, localPath string) error {
+	// Create a timeout context for this specific clone operation
+	cloneCtx, cancel := context.WithTimeout(ctx, m.config.CloneTimeout)
+	defer cancel()
+
 	args := []string{"clone"}
 
 	// Add clone options
@@ -505,11 +514,19 @@ func (m *Manager) performClone(ctx context.Context, cloneURL, localPath string) 
 		args = append(args, "--progress")
 	}
 
+	// Add timeout configurations for git operations
+	if m.config.NetworkTimeout > 0 {
+		// Set git config for network timeouts
+		timeoutSeconds := int(m.config.NetworkTimeout.Seconds())
+		args = append(args, "-c", fmt.Sprintf("http.timeout=%d", timeoutSeconds))
+		args = append(args, "-c", fmt.Sprintf("remote.origin.timeout=%d", timeoutSeconds))
+	}
+
 	args = append(args, cloneURL, localPath)
 
-	m.logf("Executing: git %s", strings.Join(args, " "))
+	m.logf("Executing: git %s (timeout: %v)", strings.Join(args, " "), m.config.CloneTimeout)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(cloneCtx, "git", args...)
 
 	// Capture output for debugging
 	var output strings.Builder
@@ -521,12 +538,31 @@ func (m *Manager) performClone(ctx context.Context, cloneURL, localPath string) 
 		cmd.Stderr = &output
 	}
 
-	err := cmd.Run()
+	// Execute with timeout monitoring
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		return m.handleCloneResult(err, cloneURL, localPath, output.String())
+	case <-cloneCtx.Done():
+		// Timeout occurred - forcefully terminate the git process
+		if cmd.Process != nil {
+			m.logf("Clone timeout reached for %s, terminating git process", cloneURL)
+			if err := cmd.Process.Kill(); err != nil {
+				m.logf("Error killing process for %s: %v", cloneURL, err)
+			}
+		}
+		return fmt.Errorf("clone operation timed out after %v for %s", m.config.CloneTimeout, cloneURL)
+	}
+}
+
+// handleCloneResult processes the result of a git clone operation
+func (m *Manager) handleCloneResult(err error, cloneURL, localPath, outputStr string) error {
 	if err != nil {
 		// Check for rate limiting in git output
-		outputStr := output.String()
-
-		// Enhanced error detection
 		if strings.Contains(outputStr, "rate limit") ||
 			strings.Contains(outputStr, "too many requests") ||
 			strings.Contains(outputStr, "abuse detection") ||
@@ -804,6 +840,9 @@ func (m *Manager) waitForCompletion(ctx context.Context) {
 	defer ticker.Stop()
 
 	lastProgress := time.Now()
+	lastCompletedCount := int64(0)
+	stuckDetectionThreshold := 5 * time.Minute // Consider stuck after 5 minutes without progress
+	maxStuckTime := 10 * time.Minute           // Force timeout after 10 minutes of being stuck
 
 	for {
 		select {
@@ -812,23 +851,71 @@ func (m *Manager) waitForCompletion(ctx context.Context) {
 			return
 		case <-ticker.C:
 			stats := m.pool.GetStats()
+			currentCompleted := stats.CompletedJobs + stats.FailedJobs
 
 			// Check if all jobs are complete
 			if stats.ActiveJobs == 0 && stats.TotalJobs > 0 &&
-				(stats.CompletedJobs+stats.FailedJobs) >= stats.TotalJobs {
+				currentCompleted >= stats.TotalJobs {
 				fmt.Printf("\n🎉 All %d jobs completed\n", stats.TotalJobs)
 				return
 			}
 
+			// Deadlock detection: Check if we're making progress
+			now := time.Now()
+			progressStalled := currentCompleted == lastCompletedCount
+			timeSinceLastProgress := now.Sub(lastProgress)
+
+			// Update progress tracking
+			if currentCompleted > lastCompletedCount {
+				lastProgress = now
+				lastCompletedCount = currentCompleted
+			}
+
 			// Show periodic progress updates (every 10 seconds)
-			if time.Since(lastProgress) >= 10*time.Second {
+			if timeSinceLastProgress >= 10*time.Second {
 				if stats.TotalJobs > 0 {
-					completed := stats.CompletedJobs + stats.FailedJobs
-					percentage := float64(completed) / float64(stats.TotalJobs) * 100
+					percentage := float64(currentCompleted) / float64(stats.TotalJobs) * 100
 					fmt.Printf("📊 Progress: %.1f%% (%d/%d completed, %d active, %d failed)\n",
-						percentage, completed, stats.TotalJobs, stats.ActiveJobs, stats.FailedJobs)
+						percentage, currentCompleted, stats.TotalJobs, stats.ActiveJobs, stats.FailedJobs)
 				}
-				lastProgress = time.Now()
+				lastProgress = now
+			}
+
+			// Deadlock detection and timeout handling
+			if progressStalled && stats.ActiveJobs > 0 {
+				if timeSinceLastProgress >= stuckDetectionThreshold {
+					fmt.Printf("\n⚠️  Warning: No progress for %.1f minutes with %d active jobs\n",
+						timeSinceLastProgress.Minutes(), stats.ActiveJobs)
+
+					// Check for stuck jobs and provide more details
+					stuckJobs := m.pool.GetStuckJobs(stuckDetectionThreshold)
+					if len(stuckJobs) > 0 {
+						fmt.Printf("🔍 Found %d stuck jobs:\n", len(stuckJobs))
+						for i, job := range stuckJobs {
+							if i < 5 { // Show first 5 stuck jobs
+								fmt.Printf("  - %s (running for %v)\n", job.ID, time.Since(job.CreatedAt))
+							}
+						}
+						if len(stuckJobs) > 5 {
+							fmt.Printf("  ... and %d more stuck jobs\n", len(stuckJobs)-5)
+						}
+					}
+
+					if timeSinceLastProgress >= maxStuckTime {
+						fmt.Printf("❌ Deadlock detected: No progress for %.1f minutes. Forcing timeout.\n",
+							timeSinceLastProgress.Minutes())
+
+						// Force kill stuck jobs
+						killedCount := m.pool.ForceKillStuckJobs(maxStuckTime)
+						if killedCount > 0 {
+							fmt.Printf("🔪 Forcefully terminated %d stuck jobs\n", killedCount)
+						}
+
+						fmt.Printf("Active jobs may be stuck in long-running operations.\n")
+						fmt.Printf("Consider reducing timeout values or checking network connectivity.\n")
+						return
+					}
+				}
 			}
 		}
 	}

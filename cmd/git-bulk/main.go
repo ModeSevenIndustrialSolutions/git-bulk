@@ -33,6 +33,8 @@ type Config struct {
 	RetryDelay      time.Duration
 	QueueSize       int
 	Timeout         time.Duration
+	CloneTimeout    time.Duration // Individual clone operation timeout
+	NetworkTimeout  time.Duration // Network timeout for git operations
 	UseSSH          bool
 	DryRun          bool
 	Verbose         bool
@@ -112,6 +114,8 @@ Examples:
 	cloneCmd.Flags().IntVar(&cfg.MaxRetries, "max-retries", 3, "Maximum number of retries per repository")
 	cloneCmd.Flags().DurationVar(&cfg.RetryDelay, "retry-delay", 5*time.Second, "Delay between retries")
 	cloneCmd.Flags().IntVar(&cfg.QueueSize, "queue-size", 100, "Worker queue size")
+	cloneCmd.Flags().DurationVar(&cfg.CloneTimeout, "clone-timeout", 30*time.Minute, "Timeout for individual clone operations")
+	cloneCmd.Flags().DurationVar(&cfg.NetworkTimeout, "network-timeout", 5*time.Minute, "Network timeout for git operations")
 	cloneCmd.Flags().BoolVar(&cfg.UseSSH, "ssh", false, "Use SSH for cloning")
 	cloneCmd.Flags().BoolVar(&cfg.DryRun, "dry-run", false, "Show what would be done without actually doing it")
 	cloneCmd.Flags().IntVar(&cfg.MaxRepos, "max-repos", 0, "Maximum number of repositories to process (0 = unlimited)")
@@ -340,6 +344,8 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		Verbose:        cfg.Verbose,
 		DryRun:         cfg.DryRun,
 		ContinueOnFail: true,
+		CloneTimeout:   cfg.CloneTimeout,
+		NetworkTimeout: cfg.NetworkTimeout,
 	}
 
 	cloneManager := clone.NewManager(cloneConfig, prov, sourceInfo)

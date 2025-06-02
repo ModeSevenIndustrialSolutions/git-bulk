@@ -52,8 +52,6 @@ func TestManagerCloneRepositories(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -118,8 +116,6 @@ func TestManagerCloneRepositoriesDryRun(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	ctx := context.Background()
@@ -179,8 +175,6 @@ func TestManagerCloneRepositoriesSSH(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -247,8 +241,6 @@ func TestManagerCloneRepositoriesExistingDirectory(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	ctx := context.Background()
@@ -310,8 +302,6 @@ func TestManagerCloneRepositoriesWithHierarchy(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -379,8 +369,6 @@ func TestManagerCloneRepositoriesCancellationHandling(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -432,8 +420,6 @@ func TestManagerCloneRepositoriesInvalidRepository(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -488,8 +474,6 @@ func TestManagerStatistics(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -531,8 +515,6 @@ func TestNewManager(t *testing.T) {
 			RetryDelay:  time.Second,
 			QueueSize:   10,
 		},
-		CloneTimeout:   30 * time.Minute,
-		NetworkTimeout: 5 * time.Minute,
 	}, nil, nil)
 
 	if manager == nil {

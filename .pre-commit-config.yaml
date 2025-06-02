@@ -122,7 +122,7 @@ repos:
     rev: eabc2638a66daf5bb6c6fb052a32fa3ef7b6600d  # frozen: v2.1.6
     hooks:
       - id: golangci-lint
-        args: ["--timeout=1m"]
+        args: ["--timeout=1m", "./cmd/...", "./internal/..."]
         pass_filenames: false
 
   - repo: local

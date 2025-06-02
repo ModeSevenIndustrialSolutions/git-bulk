@@ -8,6 +8,7 @@
 # Built binary
 cmd/git-bulk/git-bulk
 bin/git-bulk
+bin/git-bulk-improved
 
 # Go test files
 provider.test

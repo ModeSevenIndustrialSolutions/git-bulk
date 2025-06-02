@@ -263,9 +263,32 @@ make security
 
 1. Fork the repository
 2. Create a feature branch
-3. Add tests for new functionality
+3. Add tests for new functionality (see `tests/` directory)
 4. Ensure all tests pass
 5. Submit a pull request
+
+For detailed information about implemented features, SSH authentication, and recent improvements, see [docs/FEATURES.md](docs/FEATURES.md).
+
+## Testing
+
+The project includes comprehensive testing in the `tests/` directory:
+
+- **Unit tests**: Located alongside source code in `internal/*/` directories
+- **Integration tests**: Located in `tests/` directory
+- **Test utilities**: Use `tests/test-utils.sh` for test environment management
+
+Run tests with:
+
+```bash
+# Run all tests
+make test
+
+# Run tests with coverage
+make test-coverage
+
+# Run integration tests
+./tests/test-utils.sh integration
+```
 
 ## License
 

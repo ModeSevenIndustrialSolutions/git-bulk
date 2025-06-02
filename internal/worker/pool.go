@@ -407,6 +407,46 @@ func (p *Pool) IsRateLimited() bool {
 	return atomic.LoadInt64(&p.rateLimited) > 0
 }
 
+// GetStuckJobs returns jobs that have been running for longer than the specified duration
+func (p *Pool) GetStuckJobs(threshold time.Duration) []*Job {
+	var stuckJobs []*Job
+
+	p.jobMap.Range(func(_, value interface{}) bool {
+		job := value.(*Job)
+		if job.GetStatus() == JobRunning {
+			// Check how long this job has been running
+			if time.Since(job.CreatedAt) > threshold {
+				stuckJobs = append(stuckJobs, job)
+			}
+		}
+		return true
+	})
+
+	return stuckJobs
+}
+
+// ForceKillStuckJobs attempts to cancel jobs that have been stuck for too long
+func (p *Pool) ForceKillStuckJobs(threshold time.Duration) int {
+	stuckJobs := p.GetStuckJobs(threshold)
+
+	for _, job := range stuckJobs {
+		p.logf("Force killing stuck job %s (running for %v)", job.ID, time.Since(job.CreatedAt))
+		job.SetStatus(JobFailed)
+		job.SetError(fmt.Errorf("job forcefully terminated due to timeout after %v", time.Since(job.CreatedAt)))
+
+		// Send to results channel
+		select {
+		case p.results <- job:
+		case <-p.ctx.Done():
+			return len(stuckJobs)
+		default:
+			// If results channel is full, continue anyway
+		}
+	}
+
+	return len(stuckJobs)
+}
+
 // logf logs a message if verbose logging is enabled
 func (p *Pool) logf(format string, args ...interface{}) {
 	if p.config.LogVerbose {

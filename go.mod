@@ -12,7 +12,7 @@ require (
 	github.com/spf13/cobra v1.9.1
 	gitlab.com/gitlab-org/api/client-go v0.129.0
 	golang.org/x/crypto v0.38.0
-	golang.org/x/time v0.11.0
+	golang.org/x/time v0.12.0
 )
 
 require (

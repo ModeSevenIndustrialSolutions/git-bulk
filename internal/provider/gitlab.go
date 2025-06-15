@@ -499,6 +499,41 @@ func (g *GitLabProvider) CreateOrganization(ctx context.Context, groupName, disp
 	}, nil
 }
 
+// CreateRepository creates a new project in the target group
+func (g *GitLabProvider) CreateRepository(ctx context.Context, groupName, repoName, description string, private bool) (*Repository, error) {
+	if err := g.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
+	visibility := gitlab.PublicVisibility
+	if private {
+		visibility = gitlab.PrivateVisibility
+	}
+
+	projectOpts := &gitlab.CreateProjectOptions{
+		Name:        &repoName,
+		Description: &description,
+		Visibility:  &visibility,
+	}
+
+	// If groupName is provided, set the namespace ID
+	if groupName != "" {
+		// Get the group to find its ID
+		group, resp, err := g.client.Groups.GetGroup(groupName, nil)
+		if err != nil {
+			return nil, g.handleRateLimit(err, resp)
+		}
+		projectOpts.NamespaceID = &group.ID
+	}
+
+	project, resp, err := g.client.Projects.CreateProject(projectOpts)
+	if err != nil {
+		return nil, g.handleRateLimit(err, resp)
+	}
+
+	return g.convertProject(project), nil
+}
+
 // SyncRepository synchronizes a forked project with its upstream
 func (g *GitLabProvider) SyncRepository(ctx context.Context, repo *Repository) error {
 	if err := g.limiter.Wait(ctx); err != nil {

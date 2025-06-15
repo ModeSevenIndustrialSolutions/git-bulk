@@ -395,6 +395,38 @@ func (g *GitHubProvider) CreateOrganization(_ context.Context, _, _, _ string) (
 	return nil, fmt.Errorf("creating organizations is not supported by GitHub API")
 }
 
+// CreateRepository creates a new repository in the target organization
+func (g *GitHubProvider) CreateRepository(ctx context.Context, orgName, repoName, description string, private bool) (*Repository, error) {
+	if err := g.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
+	repoOpts := &github.Repository{
+		Name:        github.String(repoName),
+		Description: github.String(description),
+		Private:     github.Bool(private),
+	}
+
+	var repo *github.Repository
+	var resp *github.Response
+	var err error
+
+	// Check if this is for an organization or user
+	if orgName != "" {
+		// Create in organization
+		repo, resp, err = g.client.Repositories.Create(ctx, orgName, repoOpts)
+	} else {
+		// Create in user account
+		repo, resp, err = g.client.Repositories.Create(ctx, "", repoOpts)
+	}
+
+	if err != nil {
+		return nil, g.handleRateLimit(err, resp)
+	}
+
+	return g.convertRepository(repo), nil
+}
+
 // SyncRepository synchronizes a forked repository with its upstream
 func (g *GitHubProvider) SyncRepository(ctx context.Context, repo *Repository) error {
 	if err := g.limiter.Wait(ctx); err != nil {

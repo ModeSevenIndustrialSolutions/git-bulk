@@ -82,11 +82,24 @@ func TestGerritProvider_ListRepositories(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			callCount := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Verify the correct endpoint is called
-				expectedPath := "/a/projects/"
-				if r.URL.Path != expectedPath {
-					t.Errorf("Expected path %s, got %s", expectedPath, r.URL.Path)
+				callCount++
+				// The implementation tries multiple endpoints in order:
+				// 1. /a/projects/?d (authenticated with description)
+				// 2. /a/projects/ (authenticated)
+				// 3. /projects/?d (unauthenticated with description) - fallback
+				// 4. /projects/ (unauthenticated) - fallback
+				validPaths := []string{"/a/projects/?d", "/a/projects/", "/projects/?d", "/projects/"}
+				pathValid := false
+				for _, validPath := range validPaths {
+					if r.URL.Path == validPath || r.URL.Path+"?"+r.URL.RawQuery == validPath {
+						pathValid = true
+						break
+					}
+				}
+				if !pathValid {
+					t.Errorf("Unexpected path %s, expected one of %v", r.URL.Path, validPaths)
 				}
 
 				w.Header().Set("Content-Type", "application/json")
@@ -327,7 +340,8 @@ func TestGerritProvider_ResponseParsing(t *testing.T) {
     "state": "ACTIVE"
   }
 }`,
-			expectError: true,
+			expectError:  false, // Changed: non-strict mode allows responses without magic prefix
+			expectedName: "test-project",
 		},
 		{
 			name:        "invalid JSON",

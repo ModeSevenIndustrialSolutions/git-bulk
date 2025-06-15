@@ -711,11 +711,12 @@ func (g *GerritProvider) parseResponseWithMode(resp *http.Response, target inter
 	}
 
 	// Modern Gerrit responses start with )]}' to prevent CSRF attacks
-	if strings.HasPrefix(bodyStr, ")]}'\n") {
+	switch {
+	case strings.HasPrefix(bodyStr, ")]}'\n"):
 		bodyStr = bodyStr[5:]
-	} else if strings.HasPrefix(bodyStr, ")]}'") {
+	case strings.HasPrefix(bodyStr, ")]}'"):
 		bodyStr = bodyStr[4:]
-	} else if strict {
+	case strict:
 		// In strict mode (authenticated requests), require the security prefix
 		return fmt.Errorf("invalid Gerrit response: missing security prefix")
 	}

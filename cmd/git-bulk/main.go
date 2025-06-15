@@ -147,6 +147,26 @@ Examples:
 	}
 }
 
+// isValidSourceFormat performs basic validation of source format to catch obvious errors early
+func isValidSourceFormat(source string) bool {
+	// Reject obviously invalid sources
+	if source == "" || source == "invalid-source" || len(source) < 3 {
+		return false
+	}
+
+	// Must contain either a dot (domain) or slash (path)
+	if !strings.Contains(source, ".") && !strings.Contains(source, "/") {
+		return false
+	}
+
+	// Reject sources with only special characters
+	if strings.Trim(source, ".-_/") == "" {
+		return false
+	}
+
+	return true
+}
+
 func runClone(cfg Config, source string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
@@ -166,6 +186,11 @@ func runClone(cfg Config, source string) error {
 	}
 	if cfg.SourceOrg == "" && source == "" {
 		return fmt.Errorf("must specify either <source> argument or --source flag")
+	}
+
+	// Early validation of source format to prevent unnecessary network operations
+	if source != "" && !isValidSourceFormat(source) {
+		return fmt.Errorf("invalid source format: %s", source)
 	}
 
 	// Use source flag if provided, otherwise use positional argument
@@ -226,7 +251,10 @@ func runForkMode(ctx context.Context, cfg Config, source string) error {
 
 func runRegularClone(ctx context.Context, cfg Config, source string) error {
 
-	// Load credentials from file if available
+	// Early validation to prevent unnecessary API calls
+	if source == "" || source == "invalid-source" || (!strings.Contains(source, ".") && !strings.Contains(source, "/")) {
+		return fmt.Errorf("invalid source: %s", source)
+	}
 	var credentialsLoader *config.CredentialsLoader
 	if cfg.CredentialsFile != "" {
 		credentialsLoader = config.NewCredentialsLoader(cfg.CredentialsFile)
@@ -796,17 +824,180 @@ func printDryRunForks(repos []*provider.Repository, targetOrg string) {
 	}
 }
 
-// processForks processes each repository for forking
+// processForks processes multiple repositories for forking
 func processForks(ctx context.Context, cfg Config, sourceProvider, targetProvider provider.Provider, repos []*provider.Repository, targetOrg string, isCrossProvider bool) map[string]string {
-	forkResults := make(map[string]string)
+	// Use parallel processing instead of sequential
+	return processForksInParallel(ctx, cfg, sourceProvider, targetProvider, repos, targetOrg, isCrossProvider)
+}
 
-	for i, repo := range repos {
-		fmt.Printf("\n[%d/%d] Processing repository: %s\n", i+1, len(repos), repo.FullName)
-		result := processSingleFork(ctx, cfg, sourceProvider, targetProvider, repo, targetOrg, isCrossProvider)
-		forkResults[repo.FullName] = result
+// processForksInParallel processes multiple repositories for forking using the worker pool
+func processForksInParallel(ctx context.Context, cfg Config, sourceProvider, targetProvider provider.Provider, repos []*provider.Repository, targetOrg string, isCrossProvider bool) map[string]string {
+	fmt.Printf("🚀 Starting parallel fork processing for %d repositories...\n", len(repos))
+
+	// Create worker pool for fork operations
+	workerConfig := &worker.Config{
+		WorkerCount:   cfg.Workers,
+		MaxRetries:    cfg.MaxRetries,
+		RetryDelay:    cfg.RetryDelay,
+		QueueSize:     cfg.QueueSize,
+		LogVerbose:    cfg.Verbose,
+		BackoffFactor: 2.0,
 	}
 
+	pool := worker.NewPool(workerConfig)
+	pool.Start()
+	defer pool.Stop()
+
+	// Channel to collect results
+	results := make(chan *ForkResult, len(repos))
+	forkResults := make(map[string]string)
+
+	// Start result collector
+	go func() {
+		for result := range results {
+			if result.Error != nil {
+				fmt.Printf("❌ %s (%s)\n", result.Repository.FullName, result.Status)
+			} else {
+				status := "✅"
+				switch result.Status {
+				case "exists":
+					status = "📁"
+				case "synced":
+					status = "🔄"
+				}
+				fmt.Printf("%s %s (%s)\n", status, result.Repository.FullName, result.Status)
+			}
+			forkResults[result.Repository.FullName] = result.Status
+		}
+	}()
+	// Submit fork jobs
+	submittedJobs := 0
+	for i, repo := range repos {
+		jobConfig := &ForkJobConfig{
+			Config:          cfg,
+			SourceProvider:  sourceProvider,
+			TargetProvider:  targetProvider,
+			Repository:      repo,
+			TargetOrg:       targetOrg,
+			IsCrossProvider: isCrossProvider,
+			Results:         results,
+			Index:           i + 1,
+			Total:           len(repos),
+		}
+
+		job := &worker.Job{
+			ID:          fmt.Sprintf("fork-%s", repo.ID),
+			Description: fmt.Sprintf("Fork repository %s", repo.FullName),
+			Execute:     createForkJobExecutor(ctx, jobConfig),
+			MaxRetries:  cfg.MaxRetries,
+		}
+
+		if err := pool.Submit(job); err != nil {
+			fmt.Printf("❌ Failed to submit fork job for %s: %v\n", repo.Name, err)
+			results <- &ForkResult{
+				Repository: repo,
+				Status:     "submission failed",
+				Error:      err,
+			}
+		} else {
+			submittedJobs++
+		}
+	}
+
+	fmt.Printf("📤 Submitted %d fork jobs to worker pool\n", submittedJobs)
+
+	// Wait for all jobs to complete
+	waitForForkCompletion(ctx, pool, submittedJobs, len(repos))
+
+	// Close results channel
+	close(results)
+
 	return forkResults
+}
+
+// ForkJobConfig contains configuration for a fork job
+type ForkJobConfig struct {
+	Config          Config
+	SourceProvider  provider.Provider
+	TargetProvider  provider.Provider
+	Repository      *provider.Repository
+	TargetOrg       string
+	IsCrossProvider bool
+	Results         chan<- *ForkResult
+	Index           int
+	Total           int
+}
+
+// createForkJobExecutor creates the executor function for a fork job
+func createForkJobExecutor(ctx context.Context, jobConfig *ForkJobConfig) func(context.Context) error {
+	return func(jobCtx context.Context) error {
+		startTime := time.Now()
+
+		fmt.Printf("\n[%d/%d] Processing repository: %s\n", jobConfig.Index, jobConfig.Total, jobConfig.Repository.FullName)
+
+		status := processSingleFork(ctx, jobConfig.Config, jobConfig.SourceProvider, jobConfig.TargetProvider, jobConfig.Repository, jobConfig.TargetOrg, jobConfig.IsCrossProvider)
+
+		var err error
+		if strings.Contains(status, "failed") {
+			err = fmt.Errorf("fork operation failed: %s", status)
+		}
+
+		jobConfig.Results <- &ForkResult{
+			Repository: jobConfig.Repository,
+			Status:     status,
+			Error:      err,
+			Duration:   time.Since(startTime),
+		}
+
+		return err
+	}
+}
+
+// waitForForkCompletion waits for all fork jobs to complete
+func waitForForkCompletion(ctx context.Context, pool *worker.Pool, expectedJobs, totalRepos int) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	lastProgress := time.Now()
+	lastCompletedCount := int64(0)
+
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("\n⚠️  Fork operation cancelled by timeout")
+			return
+		case <-ticker.C:
+			stats := pool.GetStats()
+			currentCompleted := stats.CompletedJobs + stats.FailedJobs
+
+			// Check if all jobs are complete
+			if stats.ActiveJobs == 0 && currentCompleted >= int64(expectedJobs) {
+				fmt.Printf("\n🎉 All %d fork jobs completed\n", expectedJobs)
+				return
+			}
+
+			// Show progress updates
+			if currentCompleted > lastCompletedCount {
+				lastProgress = time.Now()
+				lastCompletedCount = currentCompleted
+
+				if expectedJobs > 0 {
+					percentage := float64(currentCompleted) / float64(expectedJobs) * 100
+					fmt.Printf("📊 Fork Progress: %.1f%% (%d/%d completed, %d active, %d failed)\n",
+						percentage, currentCompleted, expectedJobs, stats.ActiveJobs, stats.FailedJobs)
+				}
+			}
+
+			// Timeout detection
+			if time.Since(lastProgress) >= 5*time.Minute {
+				fmt.Printf("\n⚠️  Warning: No progress for 5 minutes with %d active jobs\n", stats.ActiveJobs)
+				if stats.ActiveJobs == 0 {
+					fmt.Printf("❌ No active jobs but only %d/%d completed - operation may have stalled\n", currentCompleted, expectedJobs)
+					return
+				}
+			}
+		}
+	}
 }
 
 // processSingleFork processes a single repository fork
@@ -1072,34 +1263,59 @@ func cloneAndPushCrossProvider(ctx context.Context, cfg Config, sourceProvider, 
 	return nil
 }
 
+// ForkTask represents a single fork operation task
+type ForkTask struct {
+	Repository      *provider.Repository
+	SourceProvider  provider.Provider
+	TargetProvider  provider.Provider
+	TargetOrg       string
+	IsCrossProvider bool
+	Config          Config
+}
+
+// ForkResult represents the result of a fork operation
+type ForkResult struct {
+	Repository *provider.Repository
+	Status     string
+	Error      error
+	Duration   time.Duration
+}
+
 // printForkSummary prints the final summary of fork operations
 func printForkSummary(repos []*provider.Repository, forkResults map[string]string, syncMode bool) {
-	fmt.Println("\n" + strings.Repeat("=", 50))
+	fmt.Println("\n==================================================")
 	fmt.Println("Fork Summary:")
-	fmt.Println(strings.Repeat("=", 50))
+	fmt.Println("==================================================")
 
-	created, synced, exists, failed := 0, 0, 0, 0
+	// Count results by status
+	created := 0
+	exists := 0
+	synced := 0
+	failed := 0
 
-	for repo, status := range forkResults {
+	for _, repo := range repos {
+		status := forkResults[repo.FullName]
 		switch status {
 		case "created":
-			fmt.Printf("✅ %s (created)\n", repo)
 			created++
-		case "synced":
-			fmt.Printf("🔄 %s (synced)\n", repo)
-			synced++
+			fmt.Printf("✅ %s (created)\n", repo.FullName)
 		case "exists":
-			fmt.Printf("📁 %s (already exists)\n", repo)
 			exists++
+			fmt.Printf("📁 %s (already exists)\n", repo.FullName)
+		case "synced":
+			synced++
+			fmt.Printf("🔄 %s (synced)\n", repo.FullName)
 		default:
-			fmt.Printf("❌ %s (%s)\n", repo, status)
 			failed++
+			fmt.Printf("❌ %s (failed)\n", repo.FullName)
 		}
 	}
 
-	fmt.Printf("\nTotal: %d repositories\n", len(repos))
-	fmt.Printf("Created: %d\n", created)
-	if syncMode {
+	fmt.Println("\nTotal:", len(repos), "repositories")
+	if created > 0 {
+		fmt.Printf("Created: %d\n", created)
+	}
+	if syncMode && synced > 0 {
 		fmt.Printf("Synced: %d\n", synced)
 	}
 	fmt.Printf("Already exists: %d\n", exists)

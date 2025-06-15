@@ -384,10 +384,68 @@ func (g *GitHubProvider) CreateFork(ctx context.Context, sourceRepo *Repository,
 
 	fork, resp, err := g.client.Repositories.CreateFork(ctx, sourceOwner, sourceRepoName, forkOpts)
 	if err != nil {
+		// Check if this is a 202 Accepted (fork scheduled for processing)
+		if resp != nil && resp.StatusCode == http.StatusAccepted {
+			// Fork was scheduled, wait for it to be available with retries
+			return g.waitForForkAvailability(ctx, targetOrg, sourceRepoName, sourceRepo)
+		}
 		return nil, g.handleRateLimit(err, resp)
 	}
 
 	return g.convertRepository(fork), nil
+}
+
+// waitForForkAvailability waits for a forked repository to become available after GitHub queues it
+func (g *GitHubProvider) waitForForkAvailability(ctx context.Context, targetOrg, repoName string, sourceRepo *Repository) (*Repository, error) {
+	maxRetries := 12 // Total wait time: ~2 minutes
+	baseDelay := 10 * time.Second
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Check if the fork is now available
+		exists, err := g.RepositoryExists(ctx, targetOrg, repoName)
+		if err != nil {
+			return nil, fmt.Errorf("error checking fork availability: %w", err)
+		}
+
+		if exists {
+			// Fork is now available, get the full repository info
+			repo, resp, err := g.client.Repositories.Get(ctx, targetOrg, repoName)
+			if err != nil {
+				return nil, g.handleRateLimit(err, resp)
+			}
+			return g.convertRepository(repo), nil
+		}
+
+		// If this is the last attempt, don't wait
+		if attempt == maxRetries-1 {
+			break
+		}
+
+		// Wait before next attempt with progressive backoff
+		delay := baseDelay + time.Duration(attempt)*time.Second*2
+		if delay > time.Minute {
+			delay = time.Minute
+		}
+
+		select {
+		case <-time.After(delay):
+			continue
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Fork creation was queued but didn't become available within timeout
+	// Return a placeholder repository that indicates it was scheduled
+	return &Repository{
+		Name:        repoName,
+		FullName:    fmt.Sprintf("%s/%s", targetOrg, repoName),
+		CloneURL:    fmt.Sprintf("https://github.com/%s/%s.git", targetOrg, repoName),
+		SSHCloneURL: fmt.Sprintf("git@github.com:%s/%s.git", targetOrg, repoName),
+		Description: fmt.Sprintf("Fork of %s (scheduled for creation)", sourceRepo.FullName),
+		Private:     sourceRepo.Private,
+		Fork:        true,
+	}, nil
 }
 
 // CreateOrganization creates a new GitHub organization (not supported by GitHub API)

@@ -269,10 +269,8 @@ func TestGitLabProviderAuthentication(t *testing.T) {
 					if authHeader != tt.token {
 						t.Errorf("Expected '%s', got '%s'", tt.token, authHeader)
 					}
-				} else {
-					if authHeader != "" {
-						t.Error("Expected no Private-Token header but got one")
-					}
+				} else if authHeader != "" {
+					t.Error("Expected no Private-Token header but got one")
 				}
 
 				w.Header().Set("Content-Type", "application/json")

@@ -7,8 +7,9 @@ version = 1
 
 [[annotations]]
 path = [
-	 "go.sum",
-     "test_coverage_report*"
+	"go.sum",
+	"bin/**",
+	"test_coverage_report*"
 ]
 SPDX-License-Identifier = "Apache-2.0"
 SPDX-FileCopyrightText = "2025 The Linux Foundation"

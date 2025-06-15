@@ -149,9 +149,10 @@ security:
 	@if command -v gosec >/dev/null 2>&1; then \
 		gosec ./...; \
 	else \
-		echo "gosec not found, installing..."; \
-		go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest; \
-		gosec ./...; \
+		echo "gosec not found, please install manually:"; \
+		echo "  go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest"; \
+		echo "Note: gosec repository may have moved. Check https://github.com/securecodewarrior/gosec for current installation instructions."; \
+		exit 1; \
 	fi
 
 # Benchmark tests

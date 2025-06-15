@@ -297,10 +297,8 @@ func TestGitHubProvider_Authentication(t *testing.T) {
 					if authHeader != "token "+tt.token {
 						t.Errorf("Expected 'token %s', got '%s'", tt.token, authHeader)
 					}
-				} else {
-					if authHeader != "" {
-						t.Error("Expected no Authorization header but got one")
-					}
+				} else if authHeader != "" {
+					t.Error("Expected no Authorization header but got one")
 				}
 
 				w.Header().Set("Content-Type", "application/json")

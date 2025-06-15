@@ -5,10 +5,8 @@
 
 .credentials
 
-# Built binary
-cmd/git-bulk/git-bulk
-bin/git-bulk
-bin/git-bulk-improved
+# Built binaries
+bin/**
 
 # Go test files
 provider.test

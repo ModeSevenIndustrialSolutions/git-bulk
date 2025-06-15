@@ -31,7 +31,7 @@ func TestManagerCloneTimeout(t *testing.T) {
 			WorkerCount: 1,
 			MaxRetries:  1,
 			RetryDelay:  time.Second,
-			QueueSize:   10,
+			QueueSize:   100, // Larger queue to avoid deadlock
 		},
 		CloneTimeout:   1 * time.Second,        // Very short timeout
 		NetworkTimeout: 500 * time.Millisecond, // Very short network timeout
@@ -51,7 +51,7 @@ func TestManagerCloneTimeout(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	start := time.Now()

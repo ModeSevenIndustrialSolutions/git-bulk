@@ -411,6 +411,13 @@ func (m *Manager) createCloneTask(repo *provider.Repository) func(ctx context.Co
 			return nil
 		}
 
+		// Perform dry run check first to avoid any modifications
+		if m.config.DryRun {
+			m.logf("[DRY RUN] Would clone %s to %s", cloneURL, localPath)
+			result.Status = StatusSkipped
+			return nil
+		}
+
 		// Validate and cleanup directory if it exists but is not a valid git repository
 		if err := m.validateAndCleanupDirectory(localPath); err != nil {
 			if strings.Contains(err.Error(), "already exists") {
@@ -419,13 +426,6 @@ func (m *Manager) createCloneTask(repo *provider.Repository) func(ctx context.Co
 			}
 			result.Error = fmt.Errorf("directory validation failed: %w", err)
 			return result.Error
-		}
-
-		// Perform dry run check
-		if m.config.DryRun {
-			m.logf("[DRY RUN] Would clone %s to %s", cloneURL, localPath)
-			result.Status = StatusSkipped
-			return nil
 		}
 
 		// Create parent directory
@@ -485,7 +485,8 @@ func (m *Manager) getLocalPath(repo *provider.Repository) string {
 	var relativePath string
 
 	// For nested repositories, use the full path but validate it
-	if repo.Path != "" && strings.Contains(repo.Path, "/") {
+	switch {
+	case repo.Path != "" && strings.Contains(repo.Path, "/"):
 		// Sanitize the path to prevent directory traversal attacks
 		cleanPath := filepath.Clean(repo.Path)
 		if strings.HasPrefix(cleanPath, "..") || strings.HasPrefix(cleanPath, "/") {
@@ -494,15 +495,15 @@ func (m *Manager) getLocalPath(repo *provider.Repository) string {
 		} else {
 			relativePath = cleanPath
 		}
-	} else if repo.Path != "" {
+	case repo.Path != "":
 		// Use the provided path as-is if it doesn't contain hierarchical separators
 		relativePath = repo.Path
-	} else if strings.Contains(repo.FullName, "/") && strings.Count(repo.FullName, "/") > 1 {
+	case strings.Contains(repo.FullName, "/") && strings.Count(repo.FullName, "/") > 1:
 		// Handle deeply nested hierarchical FullName (e.g., "myorg/team1/repo1")
 		// Only use hierarchical structure for deeply nested projects (more than 1 level)
 		// This is common for Gerrit nested projects
 		relativePath = repo.FullName
-	} else {
+	default:
 		// Use organization/repository structure for simple cases
 		if m.sourceInfo != nil && m.sourceInfo.Organization != "" {
 			relativePath = filepath.Join(m.sourceInfo.Organization, repo.Name)
@@ -893,8 +894,8 @@ func (m *Manager) formatErrorMessage(err error) string {
 		lines := strings.Split(errStr, "\n")
 		if len(lines) > 0 {
 			firstLine := lines[0]
-			if strings.Contains(firstLine, "exit status") {
-				return "git clone failed, " + firstLine[strings.Index(firstLine, "exit status"):]
+			if index := strings.Index(firstLine, "exit status"); index >= 0 {
+				return "git clone failed, " + firstLine[index:]
 			}
 		}
 	}
@@ -1157,6 +1158,22 @@ func (m *Manager) submitJobsInBatches(ctx context.Context, repos []*provider.Rep
 	// Get queue size from worker config (default is 100)
 	queueSize := m.config.WorkerConfig.QueueSize
 
+	// For small numbers of repositories, don't bother with complex batching
+	if len(repos) <= 10 {
+		m.logf("Small batch: submitting %d repositories directly", len(repos))
+		for _, repo := range repos {
+			if err := m.submitCloneJobWithRetry(ctx, repo); err != nil {
+				m.logf("Failed to submit clone job for %s: %v", repo.Name, err)
+				if !m.config.ContinueOnFail {
+					return err
+				}
+			} else {
+				*submittedCount++
+			}
+		}
+		return nil
+	}
+
 	// Use 90% of queue size to be more aggressive
 	batchSize := int(float64(queueSize) * 0.9)
 	if batchSize < 20 {
@@ -1255,6 +1272,12 @@ func (m *Manager) submitCloneJobWithRetry(ctx context.Context, repo *provider.Re
 
 // waitForQueueSpace waits until there's sufficient queue space for the next batch
 func (m *Manager) waitForQueueSpace(ctx context.Context, requiredSpace int) {
+	// In dry run mode, jobs complete instantly so no need to wait for queue space
+	if m.config.DryRun {
+		m.logf("🔍 Dry run mode: skipping queue space wait")
+		return
+	}
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 

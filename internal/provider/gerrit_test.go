@@ -280,10 +280,8 @@ func TestGerritProvider_Authentication(t *testing.T) {
 					if password != tt.password {
 						t.Errorf("Expected password %s, got %s", tt.password, password)
 					}
-				} else {
-					if ok {
-						t.Error("Expected no basic auth but got some")
-					}
+				} else if ok {
+					t.Error("Expected no basic auth but got some")
 				}
 
 				w.Header().Set("Content-Type", "application/json")

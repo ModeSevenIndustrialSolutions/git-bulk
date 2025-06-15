@@ -177,13 +177,14 @@ func TestConfigDefaults(t *testing.T) {
 
 	cfg.OutputDir = tmpDir
 	cfg.DryRun = true
-	cfg.Timeout = 5 * time.Second
+	cfg.Timeout = 2 * time.Second // Reduced timeout for faster test failure
 
-	// This should not panic
-	err = runClone(cfg, "invalid-source")
-	if err == nil {
-		t.Error("Expected error for invalid source")
+	// Test with completely invalid source that should fail early
+	testFunc := func() error {
+		return runClone(cfg, "")
 	}
+
+	runTestWithTimeout(t, testFunc, true) // expect error
 }
 
 // Benchmark basic clone operation

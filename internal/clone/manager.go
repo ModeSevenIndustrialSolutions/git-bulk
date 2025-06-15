@@ -43,28 +43,31 @@ type Config struct {
 	NetworkTimeout time.Duration // Network operation timeout for git commands
 	// SSH configuration
 	SSHConfig *sshauth.Config
+	// Credential management
+	DisableCredentialHelpers bool // Disable git credential helpers to prevent password prompts
 }
 
 // DefaultConfig returns a sensible default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		WorkerConfig:     worker.DefaultConfig(),
-		OutputDir:        "./repositories",
-		UseSSH:           false,
-		Mirror:           false,
-		Bare:             false,
-		Depth:            0, // Full clone
-		Verbose:          false,
-		DryRun:           false,
-		ContinueOnFail:   true,
-		SkipExisting:     true,
-		ValidateClone:    true,
-		CleanupOnFailure: true,
-		CloneArchived:    false, // Skip archived repositories by default
-		MaxConcurrentOps: 2,
-		CloneTimeout:     30 * time.Minute, // 30 minute timeout per clone
-		NetworkTimeout:   5 * time.Minute,  // 5 minute network timeout
-		SSHConfig:        sshauth.DefaultConfig(),
+		WorkerConfig:             worker.DefaultConfig(),
+		OutputDir:                "./repositories",
+		UseSSH:                   false,
+		Mirror:                   false,
+		Bare:                     false,
+		Depth:                    0, // Full clone
+		Verbose:                  false,
+		DryRun:                   false,
+		ContinueOnFail:           true,
+		SkipExisting:             true,
+		ValidateClone:            true,
+		CleanupOnFailure:         true,
+		CloneArchived:            false, // Skip archived repositories by default
+		MaxConcurrentOps:         2,
+		CloneTimeout:             30 * time.Minute, // 30 minute timeout per clone
+		NetworkTimeout:           5 * time.Minute,  // 5 minute network timeout
+		SSHConfig:                sshauth.DefaultConfig(),
+		DisableCredentialHelpers: true, // Default to true to prevent password prompts
 	}
 }
 
@@ -612,11 +615,30 @@ func (m *Manager) performClone(ctx context.Context, cloneURL, localPath string) 
 		args = append(args, "-c", fmt.Sprintf("remote.origin.timeout=%d", timeoutSeconds))
 	}
 
+	// Disable credential helpers to prevent password prompts during bulk operations
+	// This is crucial for preventing macOS keychain (osxkeychain) and other credential
+	// helpers from prompting for passwords when SSH authentication fails and git
+	// falls back to HTTPS authentication
+	if m.config.DisableCredentialHelpers {
+		args = append(args, "-c", "credential.helper=")
+		// Also disable askpass to prevent any interactive password prompts
+		args = append(args, "-c", "core.askpass=")
+	}
+
 	args = append(args, cloneURL, localPath)
 
 	m.logf("Executing: git %s (timeout: %v)", strings.Join(args, " "), m.config.CloneTimeout)
 
 	cmd := exec.CommandContext(cloneCtx, "git", args...)
+
+	// Set environment variables to further prevent credential prompts
+	if m.config.DisableCredentialHelpers {
+		cmd.Env = append(os.Environ(),
+			"GIT_ASKPASS=",          // Disable askpass program
+			"SSH_ASKPASS=",          // Disable SSH askpass program
+			"GIT_TERMINAL_PROMPT=0", // Disable terminal prompting in Git 2.3+
+		)
+	}
 
 	// Capture output for debugging
 	var output strings.Builder
@@ -661,6 +683,65 @@ func (m *Manager) handleCloneResult(err error, cloneURL, localPath, outputStr st
 			return &provider.RateLimitError{
 				RetryAfter: time.Minute * 2,
 				Message:    fmt.Sprintf("Git clone rate limited: %s", outputStr),
+			}
+		}
+
+		// Check for credential helper prompts or password authentication fallback
+		if strings.Contains(outputStr, "Password for") ||
+			strings.Contains(outputStr, "Username for") ||
+			strings.Contains(outputStr, "keychain") ||
+			strings.Contains(outputStr, "credential helper") ||
+			strings.Contains(outputStr, "osxkeychain") ||
+			strings.Contains(outputStr, "manager-core") ||
+			strings.Contains(outputStr, "store credentials") ||
+			strings.Contains(outputStr, "terminal prompts disabled") ||
+			strings.Contains(outputStr, "could not read Username") ||
+			strings.Contains(outputStr, "could not read Password") {
+
+			// Detect SSH to HTTPS fallback scenario
+			isSSHFallback := strings.Contains(cloneURL, "git@") || strings.Contains(cloneURL, "ssh://")
+
+			m.logf("⚠️  CREDENTIAL HELPER DETECTED: Git attempted password authentication")
+			if isSSHFallback {
+				m.logf("🔍 SSH authentication likely failed, git fell back to HTTPS authentication")
+				m.logf("💡 SSH FALLBACK DETECTED: Check SSH configuration and credentials")
+			}
+
+			// Provide explicit guidance with specific flag information
+			m.logf("💡 SOLUTION: Use --disable-credential-helpers flag to prevent password prompts:")
+			m.logf("   git-bulk clone %s --disable-credential-helpers", cloneURL)
+			m.logf("📖 NOTE: Credential helpers are disabled by default since v1.0")
+
+			if isSSHFallback {
+				m.logf("🔧 SSH ALTERNATIVE: Fix SSH authentication setup:")
+				m.logf("   git-bulk ssh-setup --verbose")
+				m.logf("   ssh -T git@github.com  # Test SSH connectivity")
+			}
+
+			return fmt.Errorf("git credential helper attempted to prompt for password during bulk operation\n"+
+				"This indicates SSH authentication failed and git fell back to HTTPS authentication.\n"+
+				"Use --disable-credential-helpers flag to prevent this (enabled by default).\n"+
+				"Or fix SSH authentication with: git-bulk ssh-setup --verbose\n"+
+				"Output: %s", outputStr)
+		}
+
+		// Check for SSH-specific authentication failures that indicate fallback scenarios
+		if strings.Contains(outputStr, "Permission denied (publickey)") ||
+			strings.Contains(outputStr, "Host key verification failed") ||
+			strings.Contains(outputStr, "ssh: connect to host") ||
+			strings.Contains(outputStr, "Connection refused") {
+
+			// This is an SSH failure that might cause git to fall back to HTTPS
+			isSSHURL := strings.Contains(cloneURL, "git@") || strings.Contains(cloneURL, "ssh://")
+
+			if isSSHURL {
+				m.logf("🔧 SSH AUTHENTICATION FAILED: %s", cloneURL)
+				m.logf("⚠️  This may cause git to fall back to HTTPS authentication")
+				m.logf("💡 TROUBLESHOOTING:")
+				m.logf("   1. Check SSH setup: git-bulk ssh-setup --verbose")
+				m.logf("   2. Test SSH connectivity: ssh -T git@github.com")
+				m.logf("   3. Verify SSH keys: ssh-add -l")
+				m.logf("   4. Use credential helper protection: --disable-credential-helpers")
 			}
 		}
 

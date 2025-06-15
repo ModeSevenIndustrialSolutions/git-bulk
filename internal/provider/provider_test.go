@@ -248,6 +248,16 @@ func (m *MockProvider) SyncRepository(_ context.Context, _ *Repository) error {
 	return nil
 }
 
+func (m *MockProvider) CreateRepository(_ context.Context, orgName, repoName, description string, private bool) (*Repository, error) {
+	return &Repository{
+		ID:          "3",
+		Name:        repoName,
+		FullName:    orgName + "/" + repoName,
+		Description: description,
+		Private:     private,
+	}, nil
+}
+
 func (m *MockProvider) RepositoryExists(_ context.Context, _, _ string) (bool, error) {
 	return false, nil
 }

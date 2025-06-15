@@ -556,6 +556,11 @@ func (g *GerritProvider) CreateOrganization(_ context.Context, _, _, _ string) (
 	return nil, fmt.Errorf("gerrit does not support creating organizations")
 }
 
+// CreateRepository creates a new project in Gerrit (not supported for cross-provider)
+func (g *GerritProvider) CreateRepository(_ context.Context, _, _, _ string, _ bool) (*Repository, error) {
+	return nil, fmt.Errorf("creating repositories is not supported for Gerrit in cross-provider operations")
+}
+
 // SyncRepository synchronizes a repository (not applicable for Gerrit)
 func (g *GerritProvider) SyncRepository(_ context.Context, _ *Repository) error {
 	return fmt.Errorf("gerrit does not support repository synchronization")

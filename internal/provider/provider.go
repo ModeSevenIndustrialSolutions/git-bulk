@@ -86,6 +86,9 @@ type Provider interface {
 	// CreateFork creates a fork of a repository in the target organization
 	CreateFork(ctx context.Context, sourceRepo *Repository, targetOrg string) (*Repository, error)
 
+	// CreateRepository creates a new empty repository in the target organization
+	CreateRepository(ctx context.Context, orgName, repoName, description string, private bool) (*Repository, error)
+
 	// CreateOrganization creates a new organization (if supported)
 	CreateOrganization(ctx context.Context, orgName, displayName, description string) (*Organization, error)
 

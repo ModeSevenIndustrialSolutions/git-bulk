@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -51,10 +52,13 @@ type Config struct {
 	SourceOrg                string
 	TargetOrg                string
 	SyncMode                 bool
+	AllowHTTPSFallback       bool // If true, permit HTTPS fallback when SSH clone fails
 }
 
 func main() {
 	var cfg Config
+	// Default to SSH for all clone operations
+	cfg.UseSSH = true
 
 	rootCmd := &cobra.Command{
 		Use:   "git-bulk",
@@ -75,7 +79,7 @@ Examples:
   git-bulk clone https://gerrit.example.com                    # Clone all repos from Gerrit
   git-bulk clone git@github.com:myorg/myrepo.git               # Clone specific repo
   git-bulk clone github.com/myorg --dry-run                    # Show what would be cloned
-  git-bulk clone github.com/myorg --ssh                        # Use SSH for cloning
+  git-bulk clone github.com/myorg                              # SSH is default; HTTPS fallback requires approval
   git-bulk clone github.com/myorg --max-repos 10               # Limit to 10 repositories
   git-bulk clone --source github.com/sourceorg --target github.com/targetorg      # Same-provider fork
   git-bulk clone --source github.com/sourceorg --target gitlab.com/targetgroup   # Cross-provider fork
@@ -121,7 +125,8 @@ Examples:
 	cloneCmd.Flags().IntVar(&cfg.QueueSize, "queue-size", 100, "Worker queue size")
 	cloneCmd.Flags().DurationVar(&cfg.CloneTimeout, "clone-timeout", 30*time.Minute, "Timeout for individual clone operations")
 	cloneCmd.Flags().DurationVar(&cfg.NetworkTimeout, "network-timeout", 5*time.Minute, "Network timeout for git operations")
-	cloneCmd.Flags().BoolVar(&cfg.UseSSH, "ssh", false, "Use SSH for cloning")
+
+	cloneCmd.Flags().BoolVar(&cfg.AllowHTTPSFallback, "allow-https-fallback", false, "Allow non-interactive HTTPS fallback if SSH cloning fails")
 	cloneCmd.Flags().BoolVar(&cfg.DryRun, "dry-run", false, "Show what would be done without actually doing it")
 	cloneCmd.Flags().IntVar(&cfg.MaxRepos, "max-repos", 0, "Maximum number of repositories to process (0 = unlimited)")
 	cloneCmd.Flags().BoolVar(&cfg.CloneArchived, "clone-archived", false, "Include archived/read-only repositories in cloning (by default they are skipped)")
@@ -185,6 +190,19 @@ func runForkMode(ctx context.Context, cfg Config, source string) error {
 	fmt.Printf("Fork mode: %s -> %s\n", source, cfg.TargetOrg)
 	if cfg.SyncMode {
 		fmt.Println("Sync mode enabled: will update existing forks")
+	}
+	if !cfg.DryRun && !cfg.AllowHTTPSFallback {
+		isTerminal := false
+		if fi, err := os.Stdin.Stat(); err == nil {
+			isTerminal = (fi.Mode() & os.ModeCharDevice) != 0
+		}
+		if isTerminal {
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print("Allow HTTPS fallback if SSH cloning fails? [y/N]: ")
+			text, _ := reader.ReadString('\n')
+			text = strings.TrimSpace(strings.ToLower(text))
+			cfg.AllowHTTPSFallback = text == "y" || text == "yes"
+		}
 	}
 
 	// Setup credentials and providers
@@ -284,31 +302,19 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		GerritUsername: cfg.GerritUser,
 		GerritPassword: cfg.GerritPass,
 		GerritToken:    cfg.GerritToken,
-		EnableSSH:      cfg.UseSSH,
+		EnableSSH:      true,
 	}
 
 	manager := provider.NewProviderManager(providerConfig)
 
 	// Register providers - always register GitHub and GitLab for maximum compatibility
-	if cfg.UseSSH {
 		// Use SSH-enabled providers
 		if githubProvider, err := provider.NewGitHubProviderWithSSH(cfg.GitHubToken, "", true); err == nil {
 			manager.RegisterProvider("github", githubProvider)
 		}
-
 		if gitlabProvider, err := provider.NewGitLabProviderWithSSH(cfg.GitLabToken, "", true); err == nil {
 			manager.RegisterProvider("gitlab", gitlabProvider)
 		}
-	} else {
-		// Use standard HTTP providers
-		if githubProvider, err := provider.NewGitHubProvider(cfg.GitHubToken, ""); err == nil {
-			manager.RegisterProvider("github", githubProvider)
-		}
-
-		if gitlabProvider, err := provider.NewGitLabProvider(cfg.GitLabToken, ""); err == nil {
-			manager.RegisterProvider("gitlab", gitlabProvider)
-		}
-	}
 
 	// Don't pre-register Gerrit providers with empty URLs - let GetProviderForSource handle dynamic creation
 	// This allows proper baseURL setting and SSH fallback to work correctly
@@ -401,26 +407,66 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Start cloning
-	fmt.Printf("Cloning repositories to %s...\n", cfg.OutputDir)
-	results, err := cloneManager.CloneRepositories(ctx, repos, cfg.OutputDir, false, cfg.UseSSH)
-	if err != nil {
-		return fmt.Errorf("failed to clone repositories: %w", err)
-	}
+	// Prompt for HTTPS fallback approval if not dry-run
+			if !cfg.DryRun && !cfg.AllowHTTPSFallback {
+				isTerminal := false
+				if fi, err := os.Stdin.Stat(); err == nil {
+					isTerminal = (fi.Mode() & os.ModeCharDevice) != 0
+				}
+				if isTerminal {
+					reader := bufio.NewReader(os.Stdin)
+					fmt.Print("Allow HTTPS fallback if SSH cloning fails? [y/N]: ")
+					text, _ := reader.ReadString('\n')
+					text = strings.TrimSpace(strings.ToLower(text))
+					cfg.AllowHTTPSFallback = text == "y" || text == "yes"
+				}
+			}
 
-	// Print results
-	fmt.Println("\nClone results:")
-	for _, result := range results {
-		if result.Error != nil {
-			// Format error for concise display
-			errorMsg := formatErrorMessage(result.Error)
-			fmt.Printf("❌ %s [%s]\n", result.Repository.FullName, errorMsg)
-		} else {
-			fmt.Printf("✅ %s\n", result.Repository.FullName)
+		// Start cloning
+		fmt.Printf("Cloning repositories to %s...\n", cfg.OutputDir)
+		results, err := cloneManager.CloneRepositories(ctx, repos, cfg.OutputDir, false, cfg.UseSSH)
+		if err != nil {
+			return fmt.Errorf("failed to clone repositories: %w", err)
 		}
-	}
 
-	return nil
+		// Print results
+		fmt.Println("\nClone results:")
+		for _, result := range results {
+			if result.Error != nil {
+				// Format error for concise display
+				errorMsg := formatErrorMessage(result.Error)
+				fmt.Printf("❌ %s [%s]\n", result.Repository.FullName, errorMsg)
+			} else {
+				fmt.Printf("✅ %s\n", result.Repository.FullName)
+			}
+		}
+
+		// Attempt HTTPS fallback for failures if approved
+		if cfg.AllowHTTPSFallback {
+			var failedRepos []*provider.Repository
+			for _, result := range results {
+				if result.Error != nil {
+					failedRepos = append(failedRepos, result.Repository)
+				}
+			}
+			if len(failedRepos) > 0 {
+				fmt.Printf("\nAttempting HTTPS fallback for %d repositories...\n", len(failedRepos))
+				fallbackResults, err := cloneManager.CloneRepositories(ctx, failedRepos, cfg.OutputDir, false, false)
+				if err != nil {
+					return fmt.Errorf("HTTPS fallback clone failed: %w", err)
+				}
+				fmt.Println("\nHTTPS fallback results:")
+				for _, result := range fallbackResults {
+					if result.Error != nil {
+						fmt.Printf("❌ %s [%s]\n", result.Repository.FullName, formatErrorMessage(result.Error))
+					} else {
+						fmt.Printf("✅ %s\n", result.Repository.FullName)
+					}
+				}
+			}
+		}
+
+		return nil
 }
 
 func runSSHSetup(cfg Config) error {
@@ -490,7 +536,17 @@ func cloneForkWithRemotes(ctx context.Context, cfg Config, provider provider.Pro
 
 	// Clone the fork
 	if err := runGitCommand(ctx, "clone", forkURL, localPath); err != nil {
-		return fmt.Errorf("failed to clone fork: %w", err)
+		if cfg.AllowHTTPSFallback && (strings.HasPrefix(forkURL, "git@") || strings.HasPrefix(forkURL, "ssh://")) {
+			httpsURL := sshToHTTPS(forkURL)
+			if cfg.Verbose {
+				fmt.Printf("SSH clone failed, attempting HTTPS fallback: %s\n", httpsURL)
+			}
+			if err2 := runGitCommand(ctx, "clone", httpsURL, localPath); err2 != nil {
+				return fmt.Errorf("failed to clone fork (HTTPS fallback): %w", err2)
+			}
+		} else {
+			return fmt.Errorf("failed to clone fork: %w", err)
+		}
 	}
 
 	// Setup remotes
@@ -620,6 +676,34 @@ func formatErrorMessage(err error) string {
 	return strings.TrimSpace(firstLine)
 }
 
+func sshToHTTPS(u string) string {
+	// git@host:org/repo.git -> https://host/org/repo.git
+	if strings.HasPrefix(u, "git@") {
+		// Trim "git@" and split host:path
+		rest := strings.TrimPrefix(u, "git@")
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) == 2 {
+			host := parts[0]
+			path := strings.TrimPrefix(parts[1], "/")
+			return fmt.Sprintf("https://%s/%s", host, path)
+		}
+	}
+	// ssh://host[:port]/path -> https://host/path (drop port)
+	if strings.HasPrefix(u, "ssh://") {
+		rest := strings.TrimPrefix(u, "ssh://")
+		parts := strings.SplitN(rest, "/", 2)
+		hostPort := parts[0]
+		path := ""
+		if len(parts) == 2 {
+			path = parts[1]
+		}
+		// Strip port if present
+		host := strings.SplitN(hostPort, ":", 2)[0]
+		return fmt.Sprintf("https://%s/%s", host, path)
+	}
+	return u
+}
+
 // setupForkProviders configures and validates providers for fork operations
 func setupForkProviders(cfg Config, source string) (provider.Provider, provider.Provider, *provider.SourceInfo, *provider.SourceInfo, error) {
 	// Load credentials
@@ -725,7 +809,7 @@ func createProviderManager(cfg Config) *provider.Manager {
 		GerritUsername: cfg.GerritUser,
 		GerritPassword: cfg.GerritPass,
 		GerritToken:    cfg.GerritToken,
-		EnableSSH:      cfg.UseSSH,
+		EnableSSH:      true,
 	}
 
 	manager := provider.NewProviderManager(providerConfig)
@@ -738,20 +822,11 @@ func createProviderManager(cfg Config) *provider.Manager {
 
 // registerProviders registers appropriate providers based on configuration
 func registerProviders(manager *provider.Manager, cfg Config) {
-	if cfg.UseSSH {
-		if githubProvider, err := provider.NewGitHubProviderWithSSH(cfg.GitHubToken, "", true); err == nil {
-			manager.RegisterProvider("github", githubProvider)
-		}
-		if gitlabProvider, err := provider.NewGitLabProviderWithSSH(cfg.GitLabToken, "", true); err == nil {
-			manager.RegisterProvider("gitlab", gitlabProvider)
-		}
-	} else {
-		if githubProvider, err := provider.NewGitHubProvider(cfg.GitHubToken, ""); err == nil {
-			manager.RegisterProvider("github", githubProvider)
-		}
-		if gitlabProvider, err := provider.NewGitLabProvider(cfg.GitLabToken, ""); err == nil {
-			manager.RegisterProvider("gitlab", gitlabProvider)
-		}
+	if githubProvider, err := provider.NewGitHubProviderWithSSH(cfg.GitHubToken, "", true); err == nil {
+		manager.RegisterProvider("github", githubProvider)
+	}
+	if gitlabProvider, err := provider.NewGitLabProviderWithSSH(cfg.GitLabToken, "", true); err == nil {
+		manager.RegisterProvider("gitlab", gitlabProvider)
 	}
 }
 
@@ -980,7 +1055,17 @@ func cloneCrossProviderWithRemotes(ctx context.Context, cfg Config, sourceProvid
 
 	// Clone the target repository (which should have the content)
 	if err := runGitCommand(ctx, "clone", targetURL, localPath); err != nil {
-		return fmt.Errorf("failed to clone repository: %w", err)
+		if cfg.AllowHTTPSFallback && (strings.HasPrefix(targetURL, "git@") || strings.HasPrefix(targetURL, "ssh://")) {
+			httpsURL := sshToHTTPS(targetURL)
+			if cfg.Verbose {
+				fmt.Printf("SSH clone failed, attempting HTTPS fallback: %s\n", httpsURL)
+			}
+			if err2 := runGitCommand(ctx, "clone", httpsURL, localPath); err2 != nil {
+				return fmt.Errorf("failed to clone repository (HTTPS fallback): %w", err2)
+			}
+		} else {
+			return fmt.Errorf("failed to clone repository: %w", err)
+		}
 	}
 
 	// Setup remotes
@@ -1039,7 +1124,17 @@ func cloneAndPushCrossProvider(ctx context.Context, cfg Config, sourceProvider, 
 	}
 
 	if err := runGitCommand(ctx, "clone", "--bare", sourceURL, tempDir); err != nil {
-		return fmt.Errorf("failed to clone source repository: %w", err)
+		if cfg.AllowHTTPSFallback && (strings.HasPrefix(sourceURL, "git@") || strings.HasPrefix(sourceURL, "ssh://")) {
+			httpsURL := sshToHTTPS(sourceURL)
+			if cfg.Verbose {
+				fmt.Printf("SSH clone of source failed, attempting HTTPS fallback: %s\n", httpsURL)
+			}
+			if err2 := runGitCommand(ctx, "clone", "--bare", httpsURL, tempDir); err2 != nil {
+				return fmt.Errorf("failed to clone source repository (HTTPS fallback): %w", err2)
+			}
+		} else {
+			return fmt.Errorf("failed to clone source repository: %w", err)
+		}
 	}
 
 	// Change to temp directory
@@ -1066,7 +1161,17 @@ func cloneAndPushCrossProvider(ctx context.Context, cfg Config, sourceProvider, 
 
 	// Push all branches and tags to target
 	if err := runGitCommand(ctx, "push", "--mirror", targetURL); err != nil {
-		return fmt.Errorf("failed to push to target repository: %w", err)
+		if cfg.AllowHTTPSFallback && (strings.HasPrefix(targetURL, "git@") || strings.HasPrefix(targetURL, "ssh://")) {
+			httpsURL := sshToHTTPS(targetURL)
+			if cfg.Verbose {
+				fmt.Printf("SSH push failed, attempting HTTPS fallback to: %s\n", httpsURL)
+			}
+			if err2 := runGitCommand(ctx, "push", "--mirror", httpsURL); err2 != nil {
+				return fmt.Errorf("failed to push to target repository (HTTPS fallback): %w", err2)
+			}
+		} else {
+			return fmt.Errorf("failed to push to target repository: %w", err)
+		}
 	}
 
 	return nil

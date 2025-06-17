@@ -52,7 +52,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		WorkerConfig:             worker.DefaultConfig(),
 		OutputDir:                "./repositories",
-		UseSSH:                   false,
+		UseSSH:                   true,
 		Mirror:                   false,
 		Bare:                     false,
 		Depth:                    0, // Full clone

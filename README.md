@@ -125,8 +125,8 @@ git-bulk clone github.com/myorg --output ./repos
 # Fork repositories from GitHub to GitLab (cross-provider)
 git-bulk clone --source github.com/sourceorg --target gitlab.com/targetgroup
 
-# Use SSH authentication
-git-bulk clone github.com/myorg --ssh --output ./repos
+# SSH is the default
+git-bulk clone github.com/myorg --output ./repos
 
 # Validate SSH setup
 git-bulk ssh-setup --verbose
@@ -146,8 +146,9 @@ git-bulk clone gitlab.com/mygroup --output ./repos
 # Clone from Gerrit
 git-bulk clone https://gerrit.example.com --output ./repos
 
-# Use SSH for cloning
-git-bulk clone github.com/myorg --ssh --output ./repos
+# SSH is the default; HTTPS fallback requires interactive approval (use --allow-https-fallback for non-interactive environments)
+git-bulk clone github.com/myorg --allow-https-fallback --output ./repos
+git-bulk clone github.com/myorg --output ./repos
 
 # Dry run to see what would be cloned
 git-bulk clone github.com/myorg --dry-run --verbose
@@ -161,6 +162,11 @@ git-bulk clone github.com/myorg --clone-archived --output ./repos
 # Use custom credentials file
 git-bulk clone github.com/myorg --credentials-file ./my-credentials --output ./repos
 ```
+
+Note: SSH is the default for all clone and fork operations. If an SSH attempt
+fails, git-bulk will ask you to approve a one-time HTTPS fallback before
+proceeding, or you can pass --allow-https-fallback to permit non-interactive
+fallback (useful for CI).
 
 ### Fork Operations
 
@@ -196,8 +202,8 @@ git-bulk clone --source gerrit.example.com --target gitlab.com/targetgroup
 #### Fork Options
 
 ```bash
-# Fork with SSH support
-git-bulk clone --source github.com/sourceorg --target github.com/targetorg --ssh
+# SSH is the default for fork operations
+git-bulk clone --source github.com/sourceorg --target github.com/targetorg
 
 # Fork with custom output directory
 git-bulk clone -o ./forks --source github.com/sourceorg --target github.com/targetorg
@@ -248,15 +254,17 @@ git-bulk ssh-setup --verbose
 #### Using SSH for Operations
 
 ```bash
-# Use SSH for all clone operations
-git-bulk clone github.com/myorg --ssh --output ./repos
+# SSH is the default for all clone operations
+git-bulk clone github.com/myorg --output ./repos
 
-# SSH works with all supported providers
-git-bulk clone gitlab.com/mygroup --ssh --output ./repos
-git-bulk clone https://gerrit.example.com --ssh --output ./repos
+# SSH works with all supported providers by default
+git-bulk clone gitlab.com/mygroup --output ./repos
+git-bulk clone https://gerrit.example.com --output ./repos
+# Non-interactive HTTPS fallback when SSH fails
+git-bulk clone github.com/myorg --allow-https-fallback --output ./repos
 
-# SSH with fork operations
-git-bulk clone --source github.com/sourceorg --target gitlab.com/targetgroup --ssh
+# SSH is the default with fork operations
+git-bulk clone --source github.com/sourceorg --target gitlab.com/targetgroup
 ```
 
 #### SSH Configuration
@@ -468,15 +476,15 @@ git-bulk ssh-setup --verbose
 #### SSH Operations Examples
 
 ```bash
-# Use SSH for all clone operations
-git-bulk clone github.com/myorg --ssh --output ./repos
+# SSH is the default for all clone operations
+git-bulk clone github.com/myorg --output ./repos
 
-# SSH works with all supported providers
-git-bulk clone gitlab.com/mygroup --ssh --output ./repos
-git-bulk clone https://gerrit.example.com --ssh --output ./repos
+# SSH works with all supported providers by default
+git-bulk clone gitlab.com/mygroup --output ./repos
+git-bulk clone https://gerrit.example.com --output ./repos
 
-# SSH with fork operations
-git-bulk clone --source github.com/sourceorg --target gitlab.com/targetgroup --ssh
+# SSH is the default with fork operations
+git-bulk clone --source github.com/sourceorg --target gitlab.com/targetgroup
 ```
 
 #### SSH Configuration Details
@@ -674,11 +682,11 @@ enumeration when HTTP/HTTPS API endpoints fail.
 **Usage:**
 
 ```bash
-# Automatic SSH fallback when HTTP fails
-git-bulk clone gerrit.example.com --ssh
+# Interactive HTTPS fallback when SSH fails
+git-bulk clone gerrit.example.com
 
 # With Gerrit username
-git-bulk clone gerrit.example.com --ssh --gerrit-user myusername
+git-bulk clone gerrit.example.com --gerrit-user myusername
 ```
 
 **Implementation Details:**

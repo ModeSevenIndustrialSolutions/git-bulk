@@ -26,6 +26,7 @@ type Config struct {
 	WorkerConfig   *worker.Config
 	OutputDir      string
 	UseSSH         bool
+	UseGHRepoClone bool
 	Mirror         bool
 	Bare           bool
 	Depth          int
@@ -45,6 +46,7 @@ type Config struct {
 	SSHConfig *sshauth.Config
 	// Credential management
 	DisableCredentialHelpers bool // Disable git credential helpers to prevent password prompts
+	PreCommitInstallHooks    bool // Install pre-commit hooks with 'pre-commit install' after clone
 }
 
 // DefaultConfig returns a sensible default configuration
@@ -53,6 +55,7 @@ func DefaultConfig() *Config {
 		WorkerConfig:             worker.DefaultConfig(),
 		OutputDir:                "./repositories",
 		UseSSH:                   true,
+		UseGHRepoClone:           false,
 		Mirror:                   false,
 		Bare:                     false,
 		Depth:                    0, // Full clone
@@ -68,6 +71,7 @@ func DefaultConfig() *Config {
 		NetworkTimeout:           5 * time.Minute,  // 5 minute network timeout
 		SSHConfig:                sshauth.DefaultConfig(),
 		DisableCredentialHelpers: true, // Default to true to prevent password prompts
+		PreCommitInstallHooks:    false, // Do not install hooks by default
 	}
 }
 
@@ -108,6 +112,11 @@ type Result struct {
 	JobID      string
 	Status     Status
 	RetryCount int
+
+	// Pre-commit installation reporting
+	PreCommitInstalled bool   // true if pre-commit install succeeded
+	PreCommitSkipped   bool   // true if skipped due to missing .pre-commit-config.yaml
+	PreCommitError     string // non-empty if pre-commit install errored
 }
 
 // Status represents the status of a clone operation
@@ -435,7 +444,7 @@ func (m *Manager) createCloneTask(repo *provider.Repository) func(ctx context.Co
 		}
 
 		// Clone the repository
-		result.Error = m.performClone(ctx, cloneURL, localPath)
+		result.Error = m.performClone(ctx, repo, cloneURL, localPath)
 		if result.Error != nil {
 			result.Status = StatusFailed
 			// Perform cleanup if enabled
@@ -468,6 +477,39 @@ func (m *Manager) createCloneTask(repo *provider.Repository) func(ctx context.Co
 			result.Status = StatusSuccess
 		}
 
+		// Optionally install pre-commit hooks after a successful clone
+		if m.config.PreCommitInstallHooks && !m.config.DryRun {
+			// Only attempt install when .pre-commit-config.yaml exists
+			cfgPath := filepath.Join(localPath, ".pre-commit-config.yaml")
+			if _, statErr := os.Stat(cfgPath); os.IsNotExist(statErr) {
+				// Skip installation and record in result for summary
+				result.PreCommitSkipped = true
+				if m.config.Verbose {
+					m.logf("Skipping pre-commit install (no .pre-commit-config.yaml) in %s", localPath)
+				}
+			} else {
+				pcCtx, pcCancel := context.WithTimeout(ctx, 2*time.Minute)
+				defer pcCancel()
+				cmd := exec.CommandContext(pcCtx, "pre-commit", "install")
+				cmd.Dir = localPath
+				if m.config.Verbose {
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+				}
+				if err := cmd.Run(); err != nil {
+					result.PreCommitError = err.Error()
+					if m.config.Verbose {
+						m.logf("pre-commit install failed in %s: %v", localPath, err)
+					}
+					// Do not fail the clone if pre-commit installation fails
+				} else {
+					result.PreCommitInstalled = true
+					if m.config.Verbose {
+						m.logf("pre-commit hooks installed in %s", localPath)
+					}
+				}
+			}
+		}
 		m.stats.IncSuccessful()
 		return nil
 	}
@@ -584,11 +626,15 @@ func (m *Manager) validateAndCleanupDirectory(localPath string) error {
 }
 
 // performClone performs the actual git clone operation with enhanced error handling and timeouts
-func (m *Manager) performClone(ctx context.Context, cloneURL, localPath string) error {
+func (m *Manager) performClone(ctx context.Context, repo *provider.Repository, cloneURL, localPath string) error {
 	// Create a timeout context for this specific clone operation
 	cloneCtx, cancel := context.WithTimeout(ctx, m.config.CloneTimeout)
 	defer cancel()
 
+	// If configured, use GitHub CLI 'gh repo clone' for GitHub sources while still leveraging the worker pool
+	if m.config.UseGHRepoClone && m.provider != nil && m.provider.Name() == "github" {
+		return m.performGHClone(cloneCtx, repo, localPath)
+	}
 	args := []string{"clone"}
 
 	// Add clone options
@@ -798,6 +844,94 @@ func (m *Manager) handleCloneResult(err error, cloneURL, localPath, outputStr st
 	}
 
 	m.logf("Successfully cloned %s to %s", cloneURL, localPath)
+	return nil
+}
+
+// performGHClone performs a clone using the GitHub CLI while preserving worker parallelism
+func (m *Manager) performGHClone(cloneCtx context.Context, repo *provider.Repository, localPath string) error {
+	// Build extra git clone args to pass through gh using "--"
+	var extra []string
+	if m.config.Mirror {
+		extra = append(extra, "--mirror")
+	} else if m.config.Bare {
+		extra = append(extra, "--bare")
+	}
+	if m.config.Depth > 0 {
+		extra = append(extra, "--depth", fmt.Sprintf("%d", m.config.Depth))
+	}
+	if m.config.Verbose {
+		extra = append(extra, "--progress")
+	}
+	if m.config.NetworkTimeout > 0 {
+		timeoutSeconds := int(m.config.NetworkTimeout.Seconds())
+		extra = append(extra, "-c", fmt.Sprintf("http.timeout=%d", timeoutSeconds))
+		extra = append(extra, "-c", fmt.Sprintf("remote.origin.timeout=%d", timeoutSeconds))
+	}
+	if m.config.DisableCredentialHelpers {
+		extra = append(extra, "-c", "credential.helper=")
+		extra = append(extra, "-c", "core.askpass=")
+	}
+
+	// Construct gh command
+	args := []string{"repo", "clone", repo.FullName, localPath}
+	if len(extra) > 0 {
+		args = append(args, "--")
+		args = append(args, extra...)
+	}
+
+	m.logf("Executing: gh %s (timeout: %v)", strings.Join(args, " "), m.config.CloneTimeout)
+
+	cmd := exec.CommandContext(cloneCtx, "gh", args...)
+
+	// Prevent any interactive prompts
+	if m.config.DisableCredentialHelpers {
+		cmd.Env = append(os.Environ(),
+			"GIT_ASKPASS=",
+			"SSH_ASKPASS=",
+			"GIT_TERMINAL_PROMPT=0",
+		)
+	}
+
+	// Capture output
+	var output strings.Builder
+	if m.config.Verbose {
+		cmd.Stdout = io.MultiWriter(os.Stdout, &output)
+		cmd.Stderr = io.MultiWriter(os.Stderr, &output)
+	} else {
+		cmd.Stdout = &output
+		cmd.Stderr = &output
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			// Provide concise error without mislabeling the command used
+			return fmt.Errorf("gh repo clone failed for %s: %w\nOutput: %s", repo.FullName, err, output.String())
+		}
+	case <-cloneCtx.Done():
+		if cmd.Process != nil {
+			m.logf("Clone timeout reached for %s, terminating gh process", repo.FullName)
+			_ = cmd.Process.Kill()
+		}
+		return fmt.Errorf("clone operation timed out after %v for %s", m.config.CloneTimeout, repo.FullName)
+	}
+
+	// Validate clone if requested
+	if m.config.ValidateClone {
+		if err := m.validateClone(localPath); err != nil {
+			if m.config.CleanupOnFailure {
+				_ = os.RemoveAll(localPath)
+			}
+			return fmt.Errorf("clone validation failed: %w", err)
+		}
+	}
+
+	m.logf("Successfully cloned %s to %s (gh)", repo.FullName, localPath)
 	return nil
 }
 
@@ -1129,6 +1263,8 @@ func (m *Manager) printSummary() {
 		percentage := float64(stats.CompletedJobs) / float64(stats.TotalJobs) * 100
 		fmt.Printf("Success rate: %.1f%%\n", percentage)
 	}
+
+	// Pre-commit installation report moved to CLI summary
 }
 
 // GetResults returns all clone results

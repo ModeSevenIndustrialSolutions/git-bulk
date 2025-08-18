@@ -53,6 +53,8 @@ type Config struct {
 	TargetOrg                string
 	SyncMode                 bool
 	AllowHTTPSFallback       bool // If true, permit HTTPS fallback when SSH clone fails
+	GHRepoClone              bool // If true, use 'gh repo clone' instead of 'git clone' for GitHub repos
+	PreCommitInstallHooks    bool // If true, run 'pre-commit install' after successful clone
 }
 
 func main() {
@@ -131,6 +133,8 @@ Examples:
 	cloneCmd.Flags().IntVar(&cfg.MaxRepos, "max-repos", 0, "Maximum number of repositories to process (0 = unlimited)")
 	cloneCmd.Flags().BoolVar(&cfg.CloneArchived, "clone-archived", false, "Include archived/read-only repositories in cloning (by default they are skipped)")
 	cloneCmd.Flags().BoolVar(&cfg.DisableCredentialHelpers, "disable-credential-helpers", true, "Disable git credential helpers to prevent password prompts (recommended for bulk operations)")
+	cloneCmd.Flags().BoolVar(&cfg.GHRepoClone, "gh-repo-clone", false, "Use GitHub CLI 'gh repo clone' for cloning (GitHub only)")
+	cloneCmd.Flags().BoolVar(&cfg.PreCommitInstallHooks, "pre-commit-install-hooks", false, "Install pre-commit hooks with 'pre-commit install' after clone")
 
 	// Authentication flags
 	cloneCmd.Flags().StringVar(&cfg.GitHubToken, "github-token", "", "GitHub personal access token (or set GITHUB_TOKEN)")
@@ -191,19 +195,7 @@ func runForkMode(ctx context.Context, cfg Config, source string) error {
 	if cfg.SyncMode {
 		fmt.Println("Sync mode enabled: will update existing forks")
 	}
-	if !cfg.DryRun && !cfg.AllowHTTPSFallback {
-		isTerminal := false
-		if fi, err := os.Stdin.Stat(); err == nil {
-			isTerminal = (fi.Mode() & os.ModeCharDevice) != 0
-		}
-		if isTerminal {
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("Allow HTTPS fallback if SSH cloning fails? [y/N]: ")
-			text, _ := reader.ReadString('\n')
-			text = strings.TrimSpace(strings.ToLower(text))
-			cfg.AllowHTTPSFallback = text == "y" || text == "yes"
-		}
-	}
+
 
 	// Setup credentials and providers
 	sourceProvider, targetProvider, sourceInfo, targetInfo, err := setupForkProviders(cfg, source)
@@ -366,6 +358,35 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		return nil
 	}
 
+	// When using GitHub CLI, optionally skip archived repositories unless --clone-archived is set
+	if false && cfg.GHRepoClone && !cfg.CloneArchived {
+		filtered := make([]*provider.Repository, 0, len(repos))
+		skipped := 0
+		for _, r := range repos {
+			if r.Metadata != nil {
+				if archived, ok := r.Metadata["archived"]; ok && archived == "true" {
+					skipped++
+					continue
+				}
+			}
+			filtered = append(filtered, r)
+		}
+		if skipped > 0 {
+			fmt.Printf("Skipped %d archived repositories (use --clone-archived to include them)\n", skipped)
+		}
+		repos = filtered
+	}
+	// Optional use of GitHub CLI for cloning
+	if false && cfg.GHRepoClone {
+		if prov.Name() != "github" {
+			fmt.Println("The --gh-repo-clone flag is only supported for GitHub sources; using standard git clone.")
+		} else {
+			fmt.Printf("Cloning repositories with GitHub CLI to %s...\n", cfg.OutputDir)
+			// gh repo clone path removed; cloning via worker pool now
+			return nil
+		}
+	}
+
 	// Show credential helper guidance in verbose mode for bulk operations
 	if cfg.Verbose && !cfg.DryRun {
 		if !cfg.DisableCredentialHelpers {
@@ -391,6 +412,7 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		WorkerConfig:             workerConfig,
 		OutputDir:                cfg.OutputDir,
 		UseSSH:                   cfg.UseSSH,
+		UseGHRepoClone:           cfg.GHRepoClone,
 		Verbose:                  cfg.Verbose,
 		DryRun:                   cfg.DryRun,
 		ContinueOnFail:           true,
@@ -398,6 +420,7 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		NetworkTimeout:           cfg.NetworkTimeout,
 		CloneArchived:            cfg.CloneArchived,
 		DisableCredentialHelpers: cfg.DisableCredentialHelpers,
+		PreCommitInstallHooks:    cfg.PreCommitInstallHooks,
 	}
 
 	cloneManager := clone.NewManager(cloneConfig, prov, sourceInfo)
@@ -407,20 +430,7 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Prompt for HTTPS fallback approval if not dry-run
-			if !cfg.DryRun && !cfg.AllowHTTPSFallback {
-				isTerminal := false
-				if fi, err := os.Stdin.Stat(); err == nil {
-					isTerminal = (fi.Mode() & os.ModeCharDevice) != 0
-				}
-				if isTerminal {
-					reader := bufio.NewReader(os.Stdin)
-					fmt.Print("Allow HTTPS fallback if SSH cloning fails? [y/N]: ")
-					text, _ := reader.ReadString('\n')
-					text = strings.TrimSpace(strings.ToLower(text))
-					cfg.AllowHTTPSFallback = text == "y" || text == "yes"
-				}
-			}
+
 
 		// Start cloning
 		fmt.Printf("Cloning repositories to %s...\n", cfg.OutputDir)
@@ -429,45 +439,106 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 			return fmt.Errorf("failed to clone repositories: %w", err)
 		}
 
-		// Print results
-		fmt.Println("\nClone results:")
+		// Only show failures after the summary to avoid duplicating the interactive stream.
+		failedCount := 0
 		for _, result := range results {
 			if result.Error != nil {
-				// Format error for concise display
-				errorMsg := formatErrorMessage(result.Error)
-				fmt.Printf("❌ %s [%s]\n", result.Repository.FullName, errorMsg)
-			} else {
-				fmt.Printf("✅ %s\n", result.Repository.FullName)
+				failedCount++
+			}
+		}
+		if failedCount > 0 {
+			fmt.Println("\nClone failures:")
+			for _, result := range results {
+				if result.Error != nil {
+					// Format error for concise display
+					errorMsg := formatErrorMessage(result.Error)
+					fmt.Printf("❌ %s [%s]\n", result.Repository.FullName, errorMsg)
+				}
 			}
 		}
 
-		// Attempt HTTPS fallback for failures if approved
-		if cfg.AllowHTTPSFallback {
-			var failedRepos []*provider.Repository
-			for _, result := range results {
-				if result.Error != nil {
-					failedRepos = append(failedRepos, result.Repository)
-				}
+		// Attempt HTTPS fallback only if there were failures; prompt at this point if not pre-approved
+		var failedRepos []*provider.Repository
+		var fallbackResults []*clone.Result
+		for _, result := range results {
+			if result.Error != nil {
+				failedRepos = append(failedRepos, result.Repository)
 			}
-			if len(failedRepos) > 0 {
+		}
+		if len(failedRepos) > 0 {
+			// If not already approved, ask the user now
+			if !cfg.DryRun && !cfg.AllowHTTPSFallback {
+				cfg.AllowHTTPSFallback = promptHTTPSFallbackApproval()
+			}
+			if cfg.AllowHTTPSFallback {
 				fmt.Printf("\nAttempting HTTPS fallback for %d repositories...\n", len(failedRepos))
-				fallbackResults, err := cloneManager.CloneRepositories(ctx, failedRepos, cfg.OutputDir, false, false)
+				fallbackResults, err = cloneManager.CloneRepositories(ctx, failedRepos, cfg.OutputDir, false, false)
 				if err != nil {
 					return fmt.Errorf("HTTPS fallback clone failed: %w", err)
 				}
-				fmt.Println("\nHTTPS fallback results:")
+				// Only show HTTPS fallback failures (if any)
+				fallbackFailedCount := 0
+				for _, result := range fallbackResults {
+					if result.Error != nil {
+						fallbackFailedCount++
+					}
+				}
+				if fallbackFailedCount > 0 {
+					fmt.Println("\nHTTPS fallback failures:")
+				}
 				for _, result := range fallbackResults {
 					if result.Error != nil {
 						fmt.Printf("❌ %s [%s]\n", result.Repository.FullName, formatErrorMessage(result.Error))
-					} else {
-						fmt.Printf("✅ %s\n", result.Repository.FullName)
 					}
+				}
+			}
+		}
+
+		// Pre-commit summary (CLI-level) after all clone attempts
+		if cfg.PreCommitInstallHooks && !cfg.DryRun {
+			installed := 0
+			failed := 0
+			skipped := 0
+			var skippedRepos []string
+
+			collect := func(rs []*clone.Result) {
+				for _, r := range rs {
+					if r == nil {
+						continue
+					}
+					if r.PreCommitInstalled {
+						installed++
+					}
+					if r.PreCommitSkipped {
+						skipped++
+						if r.Repository != nil {
+							skippedRepos = append(skippedRepos, r.Repository.FullName)
+						}
+					}
+					if r.PreCommitError != "" {
+						failed++
+					}
+				}
+			}
+			collect(results)
+			collect(fallbackResults)
+
+			fmt.Println("\nPre-commit installation summary:")
+			fmt.Printf("  Installed: %d\n", installed)
+			fmt.Printf("  Skipped (missing .pre-commit-config.yaml): %d\n", skipped)
+			fmt.Printf("  Failed: %d\n", failed)
+			if len(skippedRepos) > 0 {
+				fmt.Println("Repositories skipped due to missing configuration:")
+				for _, name := range skippedRepos {
+					fmt.Printf("  - %s\n", name)
 				}
 			}
 		}
 
 		return nil
 }
+
+
 
 func runSSHSetup(cfg Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
@@ -536,13 +607,28 @@ func cloneForkWithRemotes(ctx context.Context, cfg Config, provider provider.Pro
 
 	// Clone the fork
 	if err := runGitCommand(ctx, "clone", forkURL, localPath); err != nil {
-		if cfg.AllowHTTPSFallback && (strings.HasPrefix(forkURL, "git@") || strings.HasPrefix(forkURL, "ssh://")) {
-			httpsURL := sshToHTTPS(forkURL)
-			if cfg.Verbose {
-				fmt.Printf("SSH clone failed, attempting HTTPS fallback: %s\n", httpsURL)
+		// On SSH failure, optionally prompt for HTTPS fallback approval
+		if strings.HasPrefix(forkURL, "git@") || strings.HasPrefix(forkURL, "ssh://") {
+			allow := cfg.AllowHTTPSFallback
+			if !allow && !cfg.DryRun {
+				if fi, statErr := os.Stdin.Stat(); statErr == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+					reader := bufio.NewReader(os.Stdin)
+					fmt.Print("Allow HTTPS fallback if SSH cloning fails? [y/N]: ")
+					text, _ := reader.ReadString('\n')
+					text = strings.TrimSpace(strings.ToLower(text))
+					allow = text == "y" || text == "yes"
+				}
 			}
-			if err2 := runGitCommand(ctx, "clone", httpsURL, localPath); err2 != nil {
-				return fmt.Errorf("failed to clone fork (HTTPS fallback): %w", err2)
+			if allow {
+				httpsURL := sshToHTTPS(forkURL)
+				if cfg.Verbose {
+					fmt.Printf("SSH clone failed, attempting HTTPS fallback: %s\n", httpsURL)
+				}
+				if err2 := runGitCommand(ctx, "clone", httpsURL, localPath); err2 != nil {
+					return fmt.Errorf("failed to clone fork (HTTPS fallback): %w", err2)
+				}
+			} else {
+				return fmt.Errorf("failed to clone fork: %w", err)
 			}
 		} else {
 			return fmt.Errorf("failed to clone fork: %w", err)
@@ -550,7 +636,17 @@ func cloneForkWithRemotes(ctx context.Context, cfg Config, provider provider.Pro
 	}
 
 	// Setup remotes
-	return setupRemotes(localPath, forkURL, upstreamURL, cfg.Verbose)
+	if err := setupRemotes(localPath, forkURL, upstreamURL, cfg.Verbose); err != nil {
+		return fmt.Errorf("failed to setup remotes: %w", err)
+	}
+	if cfg.PreCommitInstallHooks && !cfg.DryRun {
+		pcCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		if err := installPreCommitHooks(pcCtx, localPath, cfg.Verbose); err != nil && cfg.Verbose {
+			fmt.Printf("Warning: pre-commit install failed in %s: %v\n", localPath, err)
+		}
+	}
+	return nil
 }
 
 // getCloneURLs determines the fork and upstream URLs based on configuration
@@ -638,6 +734,17 @@ func runGitCommand(ctx context.Context, args ...string) error {
 	return cmd.Run()
 }
 
+func installPreCommitHooks(ctx context.Context, repoPath string, verbose bool) error {
+	// Install pre-commit hooks in the given repository directory
+	cmd := exec.CommandContext(ctx, "pre-commit", "install")
+	cmd.Dir = repoPath
+	if verbose {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	return cmd.Run()
+}
+
 // formatErrorMessage formats an error message for concise display
 func formatErrorMessage(err error) string {
 	if err == nil {
@@ -702,6 +809,20 @@ func sshToHTTPS(u string) string {
 		return fmt.Sprintf("https://%s/%s", host, path)
 	}
 	return u
+}
+
+// promptHTTPSFallbackApproval interacts with the user to approve a one-time HTTPS fallback.
+// It returns true if the user approves, false otherwise.
+func promptHTTPSFallbackApproval() bool {
+	fi, err := os.Stdin.Stat()
+	if err == nil && (fi.Mode()&os.ModeCharDevice) != 0 {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print("Allow HTTPS fallback if SSH cloning fails? [y/N]: ")
+		text, _ := reader.ReadString('\n')
+		text = strings.TrimSpace(strings.ToLower(text))
+		return text == "y" || text == "yes"
+	}
+	return false
 }
 
 // setupForkProviders configures and validates providers for fork operations
@@ -1055,13 +1176,21 @@ func cloneCrossProviderWithRemotes(ctx context.Context, cfg Config, sourceProvid
 
 	// Clone the target repository (which should have the content)
 	if err := runGitCommand(ctx, "clone", targetURL, localPath); err != nil {
-		if cfg.AllowHTTPSFallback && (strings.HasPrefix(targetURL, "git@") || strings.HasPrefix(targetURL, "ssh://")) {
-			httpsURL := sshToHTTPS(targetURL)
-			if cfg.Verbose {
-				fmt.Printf("SSH clone failed, attempting HTTPS fallback: %s\n", httpsURL)
+		if strings.HasPrefix(targetURL, "git@") || strings.HasPrefix(targetURL, "ssh://") {
+			allow := cfg.AllowHTTPSFallback
+			if !allow && !cfg.DryRun {
+				allow = promptHTTPSFallbackApproval()
 			}
-			if err2 := runGitCommand(ctx, "clone", httpsURL, localPath); err2 != nil {
-				return fmt.Errorf("failed to clone repository (HTTPS fallback): %w", err2)
+			if allow {
+				httpsURL := sshToHTTPS(targetURL)
+				if cfg.Verbose {
+					fmt.Printf("SSH clone failed, attempting HTTPS fallback: %s\n", httpsURL)
+				}
+				if err2 := runGitCommand(ctx, "clone", httpsURL, localPath); err2 != nil {
+					return fmt.Errorf("failed to clone repository (HTTPS fallback): %w", err2)
+				}
+			} else {
+				return fmt.Errorf("failed to clone repository: %w", err)
 			}
 		} else {
 			return fmt.Errorf("failed to clone repository: %w", err)
@@ -1069,7 +1198,17 @@ func cloneCrossProviderWithRemotes(ctx context.Context, cfg Config, sourceProvid
 	}
 
 	// Setup remotes
-	return setupRemotes(localPath, targetURL, sourceURL, cfg.Verbose)
+	if err := setupRemotes(localPath, targetURL, sourceURL, cfg.Verbose); err != nil {
+		return fmt.Errorf("failed to setup remotes: %w", err)
+	}
+	if cfg.PreCommitInstallHooks && !cfg.DryRun {
+		pcCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		if err := installPreCommitHooks(pcCtx, localPath, cfg.Verbose); err != nil && cfg.Verbose {
+			fmt.Printf("Warning: pre-commit install failed in %s: %v\n", localPath, err)
+		}
+	}
+	return nil
 }
 
 // getCrossProviderCloneURLs gets clone URLs for cross-provider setup
@@ -1124,13 +1263,21 @@ func cloneAndPushCrossProvider(ctx context.Context, cfg Config, sourceProvider, 
 	}
 
 	if err := runGitCommand(ctx, "clone", "--bare", sourceURL, tempDir); err != nil {
-		if cfg.AllowHTTPSFallback && (strings.HasPrefix(sourceURL, "git@") || strings.HasPrefix(sourceURL, "ssh://")) {
-			httpsURL := sshToHTTPS(sourceURL)
-			if cfg.Verbose {
-				fmt.Printf("SSH clone of source failed, attempting HTTPS fallback: %s\n", httpsURL)
+		if strings.HasPrefix(sourceURL, "git@") || strings.HasPrefix(sourceURL, "ssh://") {
+			allow := cfg.AllowHTTPSFallback
+			if !allow && !cfg.DryRun {
+				allow = promptHTTPSFallbackApproval()
 			}
-			if err2 := runGitCommand(ctx, "clone", "--bare", httpsURL, tempDir); err2 != nil {
-				return fmt.Errorf("failed to clone source repository (HTTPS fallback): %w", err2)
+			if allow {
+				httpsURL := sshToHTTPS(sourceURL)
+				if cfg.Verbose {
+					fmt.Printf("SSH clone of source failed, attempting HTTPS fallback: %s\n", httpsURL)
+				}
+				if err2 := runGitCommand(ctx, "clone", "--bare", httpsURL, tempDir); err2 != nil {
+					return fmt.Errorf("failed to clone source repository (HTTPS fallback): %w", err2)
+				}
+			} else {
+				return fmt.Errorf("failed to clone source repository: %w", err)
 			}
 		} else {
 			return fmt.Errorf("failed to clone source repository: %w", err)
@@ -1161,13 +1308,21 @@ func cloneAndPushCrossProvider(ctx context.Context, cfg Config, sourceProvider, 
 
 	// Push all branches and tags to target
 	if err := runGitCommand(ctx, "push", "--mirror", targetURL); err != nil {
-		if cfg.AllowHTTPSFallback && (strings.HasPrefix(targetURL, "git@") || strings.HasPrefix(targetURL, "ssh://")) {
-			httpsURL := sshToHTTPS(targetURL)
-			if cfg.Verbose {
-				fmt.Printf("SSH push failed, attempting HTTPS fallback to: %s\n", httpsURL)
+		if strings.HasPrefix(targetURL, "git@") || strings.HasPrefix(targetURL, "ssh://") {
+			allow := cfg.AllowHTTPSFallback
+			if !allow && !cfg.DryRun {
+				allow = promptHTTPSFallbackApproval()
 			}
-			if err2 := runGitCommand(ctx, "push", "--mirror", httpsURL); err2 != nil {
-				return fmt.Errorf("failed to push to target repository (HTTPS fallback): %w", err2)
+			if allow {
+				httpsURL := sshToHTTPS(targetURL)
+				if cfg.Verbose {
+					fmt.Printf("SSH push failed, attempting HTTPS fallback to: %s\n", httpsURL)
+				}
+				if err2 := runGitCommand(ctx, "push", "--mirror", httpsURL); err2 != nil {
+					return fmt.Errorf("failed to push to target repository (HTTPS fallback): %w", err2)
+				}
+			} else {
+				return fmt.Errorf("failed to push to target repository: %w", err)
 			}
 		} else {
 			return fmt.Errorf("failed to push to target repository: %w", err)

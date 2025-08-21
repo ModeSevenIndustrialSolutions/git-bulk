@@ -5,6 +5,7 @@
 package ssh
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
@@ -63,12 +64,17 @@ type Authenticator struct {
 	authMethods []AuthMethod
 }
 
-// DefaultConfig returns a default SSH configuration
+// DefaultConfig returns a default SSH configuration with signing key filtering
 func DefaultConfig() *Config {
-	return &Config{
+	config := &Config{
 		Timeout: 30 * time.Second,
 		Verbose: false,
 	}
+	
+	// Auto-detect and filter SSH keys to exclude signing keys
+	config.KeyFiles = filterSigningKeys(findAllSSHKeys())
+	
+	return config
 }
 
 // NewAuthenticator creates a new SSH authenticator with auto-detection
@@ -128,25 +134,114 @@ func (a *Authenticator) autoDetectConfig() error {
 
 // findSSHKeys finds common SSH key files
 func (a *Authenticator) findSSHKeys() []string {
+	return findAllSSHKeys()
+}
+
+// findAllSSHKeys finds all SSH key files in the SSH directory
+func findAllSSHKeys() []string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
 
 	sshDir := filepath.Join(homeDir, ".ssh")
-	commonKeys := []string{
-		"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+	
+	// Look for all private key files (no .pub extension)
+	entries, err := os.ReadDir(sshDir)
+	if err != nil {
+		return nil
 	}
 
 	var foundKeys []string
-	for _, key := range commonKeys {
-		keyPath := filepath.Join(sshDir, key)
-		if _, err := os.Stat(keyPath); err == nil {
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		
+		name := entry.Name()
+		
+		// Skip public keys, config files, and known_hosts
+		if strings.HasSuffix(name, ".pub") || 
+		   name == "config" || 
+		   name == "known_hosts" || 
+		   name == "authorized_keys" {
+			continue
+		}
+		
+		keyPath := filepath.Join(sshDir, name)
+		
+		// Check if it's a private key by trying to read it
+		if isPrivateKeyFile(keyPath) {
 			foundKeys = append(foundKeys, keyPath)
 		}
 	}
 
 	return foundKeys
+}
+
+// filterSigningKeys filters out SSH keys that are used for signing (not authentication)
+func filterSigningKeys(keys []string) []string {
+	var filteredKeys []string
+	
+	for _, keyPath := range keys {
+		if !isSigningKey(keyPath) {
+			filteredKeys = append(filteredKeys, keyPath)
+		}
+	}
+	
+	return filteredKeys
+}
+
+// isSigningKey determines if an SSH key is used for signing rather than authentication
+func isSigningKey(keyPath string) bool {
+	// Read the private key file to check for signing key indicators
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		return false
+	}
+	
+	keyString := string(keyData)
+	
+	// Check for Secretive signing key indicators
+	if strings.Contains(keyString, "sk-ssh-ed25519@openssh.com") ||
+	   strings.Contains(keyString, "sk-ecdsa-sha2-nistp256@openssh.com") ||
+	   strings.Contains(keyString, "SIGNING KEY") ||
+	   strings.Contains(keyString, "signing-key") {
+		return true
+	}
+	
+	// Check filename patterns that indicate signing keys
+	filename := filepath.Base(keyPath)
+	if strings.Contains(filename, "signing") ||
+	   strings.Contains(filename, "sign") ||
+	   strings.Contains(filename, "gpg") {
+		return true
+	}
+	
+	return false
+}
+
+// isPrivateKeyFile checks if a file appears to be a private SSH key
+func isPrivateKeyFile(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	
+	// Read first few lines to check for private key headers
+	scanner := bufio.NewScanner(file)
+	for i := 0; i < 5 && scanner.Scan(); i++ {
+		line := scanner.Text()
+		if strings.Contains(line, "BEGIN") && 
+		   (strings.Contains(line, "PRIVATE KEY") || 
+		    strings.Contains(line, "RSA PRIVATE KEY") ||
+		    strings.Contains(line, "OPENSSH PRIVATE KEY")) {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // initAuthMethods initializes available authentication methods in priority order
@@ -353,18 +448,28 @@ func (w *GitSSHWrapper) SetupGitSSH() error {
 // generateSSHWrapperScript generates a shell script that configures SSH for Git
 func (w *GitSSHWrapper) generateSSHWrapperScript() string {
 	script := `#!/bin/bash
-# Auto-generated SSH wrapper for git-bulk
+# Auto-generated SSH wrapper for git-bulk with signing key filtering
 
-# Use SSH agent if available
-if [ -n "$SSH_AUTH_SOCK" ] && [ -S "$SSH_AUTH_SOCK" ]; then
-    export SSH_AUTH_SOCK="$SSH_AUTH_SOCK"
-fi
+# COMPLETELY DISABLE SSH AGENT to prevent signing key prompts
+unset SSH_AUTH_SOCK
+unset SSH_AGENT_PID
 
 # Common SSH options for Git operations
 SSH_OPTS="-o BatchMode=yes"
 SSH_OPTS="$SSH_OPTS -o StrictHostKeyChecking=no"
 SSH_OPTS="$SSH_OPTS -o UserKnownHostsFile=/dev/null"
 SSH_OPTS="$SSH_OPTS -o ConnectTimeout=30"
+SSH_OPTS="$SSH_OPTS -o IdentitiesOnly=yes"
+
+# Add authentication keys (signing keys are already filtered out)
+for key in ~/.ssh/*; do
+    if [[ -f "$key" && ! "$key" =~ \.pub$ && ! "$key" =~ (config|known_hosts|authorized_keys)$ ]]; then
+        # Skip signing keys
+        if ! grep -q -i "signing\|sign\|gpg\|sk-ssh-ed25519@openssh.com\|sk-ecdsa-sha2-nistp256@openssh.com" "$key" 2>/dev/null; then
+            SSH_OPTS="$SSH_OPTS -o IdentityFile=$key"
+        fi
+    fi
+done
 
 # Support for different Git hosting providers
 case "$1" in
@@ -380,7 +485,7 @@ case "$1" in
         ;;
 esac
 
-# Execute SSH with our options
+# Execute SSH with our options (agent disabled)
 exec ssh $SSH_OPTS "$@"
 `
 	return script

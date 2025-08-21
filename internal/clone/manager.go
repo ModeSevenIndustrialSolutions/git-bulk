@@ -282,6 +282,15 @@ func (m *Manager) CloneRepository(ctx context.Context, repo *provider.Repository
 func (m *Manager) CloneRepositories(ctx context.Context, repos []*provider.Repository, outputDir string, dryRun bool, useSSH bool) ([]*Result, error) {
 	m.logf("Starting bulk clone operation for %d repositories", len(repos))
 
+	// Setup SSH wrapper for signing key filtering if available
+	if m.sshWrapper != nil {
+		if err := m.sshWrapper.SetupGitSSH(); err != nil {
+			m.logf("Warning: Failed to setup SSH wrapper: %v", err)
+		} else if m.config.Verbose {
+			m.logf("SSH wrapper configured for signing key filtering")
+		}
+	}
+
 	// Override config settings for this operation
 	originalOutputDir := m.config.OutputDir
 	originalDryRun := m.config.DryRun

@@ -273,18 +273,9 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		cfg.GerritToken = credentialsLoader.GetCredential("GERRIT_TOKEN")
 	}
 
-	// Show credential status in verbose mode
+	// Show credential status in verbose mode - context-aware based on source
 	if cfg.Verbose {
-		credentials := credentialsLoader.ListCredentials()
-		fmt.Println("Credential status:")
-		for cred, available := range credentials {
-			status := "❌"
-			if available {
-				status = "✅"
-			}
-			fmt.Printf("  %s %s\n", status, cred)
-		}
-		fmt.Println()
+		showContextAwareCredentialStatus(credentialsLoader, source)
 	}
 
 	// Create provider manager
@@ -408,6 +399,10 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		BackoffFactor: 2.0,
 	}
 
+	// Setup SSH configuration with signing key filtering and verbose output
+	sshConfig := sshauth.DefaultConfig()
+	sshConfig.Verbose = cfg.Verbose
+	
 	cloneConfig := &clone.Config{
 		WorkerConfig:             workerConfig,
 		OutputDir:                cfg.OutputDir,
@@ -418,12 +413,27 @@ func runRegularClone(ctx context.Context, cfg Config, source string) error {
 		ContinueOnFail:           true,
 		CloneTimeout:             cfg.CloneTimeout,
 		NetworkTimeout:           cfg.NetworkTimeout,
+		SSHConfig:                sshConfig,
 		CloneArchived:            cfg.CloneArchived,
 		DisableCredentialHelpers: cfg.DisableCredentialHelpers,
 		PreCommitInstallHooks:    cfg.PreCommitInstallHooks,
 	}
 
 	cloneManager := clone.NewManager(cloneConfig, prov, sourceInfo)
+
+	// Validate SSH setup if verbose output is enabled
+	if cfg.Verbose && cfg.UseSSH {
+		fmt.Println("SSH Configuration:")
+		fmt.Printf("  SSH Agent: %s\n", os.Getenv("SSH_AUTH_SOCK"))
+		fmt.Printf("  Filtered SSH Keys: %d found\n", len(sshConfig.KeyFiles))
+		if len(sshConfig.KeyFiles) > 0 {
+			fmt.Println("  Authentication keys (signing keys filtered out):")
+			for _, key := range sshConfig.KeyFiles {
+				fmt.Printf("    - %s\n", filepath.Base(key))
+			}
+		}
+		fmt.Println()
+	}
 
 	// Ensure output directory exists
 	if err := os.MkdirAll(cfg.OutputDir, 0755); err != nil {
@@ -920,6 +930,38 @@ func showCredentialStatus(credentialsLoader *config.CredentialsLoader) {
 		fmt.Printf("  %s %s\n", status, cred)
 	}
 	fmt.Println()
+}
+
+// showContextAwareCredentialStatus displays only relevant credentials based on the source
+func showContextAwareCredentialStatus(credentialsLoader *config.CredentialsLoader, source string) {
+	credentials := credentialsLoader.ListCredentials()
+	relevantCredentials := make(map[string]bool)
+	
+	// Determine which credentials are relevant based on the source
+	if strings.Contains(source, "github.com") {
+		relevantCredentials["GITHUB_TOKEN"] = credentials["GITHUB_TOKEN"]
+	} else if strings.Contains(source, "gitlab.com") || strings.Contains(source, "gitlab") {
+		relevantCredentials["GITLAB_TOKEN"] = credentials["GITLAB_TOKEN"]
+	} else if strings.Contains(source, "gerrit") || strings.Contains(source, ":29418") {
+		relevantCredentials["GERRIT_USERNAME"] = credentials["GERRIT_USERNAME"]
+		relevantCredentials["GERRIT_PASSWORD"] = credentials["GERRIT_PASSWORD"]
+		relevantCredentials["GERRIT_TOKEN"] = credentials["GERRIT_TOKEN"]
+	} else {
+		// Unknown provider, show all credentials
+		relevantCredentials = credentials
+	}
+	
+	if len(relevantCredentials) > 0 {
+		fmt.Println("Relevant credential status:")
+		for cred, available := range relevantCredentials {
+			status := "❌"
+			if available {
+				status = "✅"
+			}
+			fmt.Printf("  %s %s\n", status, cred)
+		}
+		fmt.Println()
+	}
 }
 
 // createProviderManager creates and configures a provider manager

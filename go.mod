@@ -9,7 +9,7 @@ toolchain go1.24.3
 
 require (
 	github.com/google/go-github/v53 v53.2.0
-	github.com/spf13/cobra v1.10.1
+	github.com/spf13/cobra v1.10.2
 	gitlab.com/gitlab-org/api/client-go v0.130.1
 	golang.org/x/crypto v0.38.0
 	golang.org/x/time v0.14.0
